@@ -6,13 +6,14 @@ import logging
 import shutil
 import sys
 import webbrowser
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from . import lateness
+from . import images, lateness
 from .canvas import CanvasClient
 from .config import ConfigError, Settings, cache_dir
 from .extract import extract_file, html_to_text, truncate
@@ -28,7 +29,8 @@ mcp = MCPServer(
     instructions=(
         "Grades Canvas LMS submissions for courses where the user is a teacher or TA. "
         "Workflow: list_grading_courses -> list_assignments -> get_assignment (read the description, rubric and "
-        "late policy) -> list_submissions -> get_submission for each student -> stage_grade -> show the user the "
+        "late policy) -> list_submissions -> get_submission for each student (plus get_submission_images whenever it "
+        "reports visual content: screenshots of code/programs are often most of the grade) -> stage_grade -> show the user the "
         "staged grades -> post_staged_grades with confirm=true only after the user approves. "
         "Base every point deduction on the assignment description or rubric and say in the comment exactly what "
         "is missing or wrong and how to fix it. Keep comments constructive and addressed to the student. "
@@ -254,15 +256,16 @@ def get_submission(course_id: int, assignment_id: int, user_id: int, download_fi
     files = []
     for att in s.get("attachments") or []:
         entry: dict[str, Any] = {"filename": att.get("display_name") or att.get("filename"), "size": att.get("size"), "content_type": att.get("content-type")}
-        if download_files and att.get("url"):
-            dest = cache_dir() / str(course_id) / str(assignment_id) / str(user_id) / f"{att['id']}-{att.get('filename') or 'file'}"
-            if not dest.exists():
-                c.download(att["url"], dest)
+        if download_files and (dest := download_attachment(course_id, assignment_id, user_id, att)):
             entry["local_path"] = str(dest)
             entry.update(extract_file(dest))
         files.append(entry)
     if files:
         content["files"] = files
+        if any(f.get("pages_with_images") or f.get("images") or f.get("kind") == "image" for f in files):
+            content["visual_content"] = (
+                "Screenshots/photos are embedded. They're not in the text above: call get_submission_images to see them before grading."
+            )
     if s.get("media_comment"):
         content["media"] = "Audio/video submission; review it in SpeedGrader."
     if s.get("submission_type") in ("online_quiz", "discussion_topic", "external_tool", "student_annotation"):
@@ -287,6 +290,39 @@ def get_submission(course_id: int, assignment_id: int, user_id: int, download_fi
         "points_possible": a.get("points_possible"),
         "speedgrader_url": c.speedgrader_url(course_id, assignment_id, user_id),
     }
+
+
+def download_attachment(course_id: int, assignment_id: int, user_id: int, att: dict) -> Path | None:
+    if not att.get("url"):
+        return None
+    dest = cache_dir() / str(course_id) / str(assignment_id) / str(user_id) / f"{att['id']}-{att.get('filename') or 'file'}"
+    if not dest.exists():
+        client().download(att["url"], dest)
+    return dest
+
+
+@mcp.tool()
+def get_submission_images(
+    course_id: int,
+    assignment_id: int,
+    user_id: int,
+    max_images: Annotated[int, Field(ge=1, le=30)] = 12,
+) -> list:
+    """Screenshots, photos and scanned pages from a student's submitted files, as images.
+
+    PDF pages that contain pictures are rendered whole (so screenshots keep their captions); images embedded
+    in Word files and uploaded image files are returned directly. Duplicates are skipped.
+    """
+    require_grader(course_id)
+    s = client().submission(course_id, assignment_id, user_id)
+    paths = [p for att in s.get("attachments") or [] if (p := download_attachment(course_id, assignment_id, user_id, att))]
+    found, total = images.collect(paths, max_images)
+    if not found:
+        return [f"No images found in {student_name(s)}'s submitted files."]
+    header = f"{student_name(s)}: {len(found)} image(s)" + (f" of {total}; raise max_images to see the rest" if total > len(found) else "")
+    out: list[Any] = [header + ". In order: " + "; ".join(label for label, _ in found)]
+    out.extend(Image(data=data, format="jpeg") for _, data in found)
+    return out
 
 
 # --- staging & posting ---------------------------------------------------------

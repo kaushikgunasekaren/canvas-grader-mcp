@@ -11,7 +11,7 @@ It reads each assignment's description, rubric, due dates and late policy, pulls
 
 - **Find your grading work**: every course where you're a teacher/TA with grading permission, assignments with how many submissions need grading.
 - **Understand the assignment**: description (as clean text), points, grading type, rubric criteria and ratings, per-student due dates (overrides and extensions), the course's automatic late policy.
-- **Read submissions**: text entries, URLs, and uploaded files: PDF, Word (.docx), Jupyter notebooks, source code and other text files. Files are downloaded to a local cache only.
+- **Read submissions**: text entries, URLs, and uploaded files: PDF, Word (.docx), Jupyter notebooks, source code and other text files. Screenshots and photos inside PDFs and Word files (and uploaded images) are passed to the AI as images, so program screenshots get graded too. Files are downloaded to a local cache only.
 - **Account for due dates**: how late each submission was. If the course has an automatic late policy, it shows the deduction Canvas will apply (so you enter the raw score); if not, it flags that any penalty from the syllabus must be applied by the grader.
 - **Stage → review → post**: grades, rubric scores and comments are staged locally, previewed, then posted only with explicit confirmation. Comments explain to the student what was missing.
 - **SpeedGrader links** for every submission, or open SpeedGrader directly in your browser.
@@ -79,7 +79,7 @@ Example prompts:
 The intended workflow is:
 
 1. `get_assignment`: the assistant reads the description, rubric and late policy.
-2. `get_submission` per student: reads their work and lateness.
+2. `get_submission` per student: reads their work and lateness, plus `get_submission_images` for screenshots/photos.
 3. `stage_grade`: proposes a grade, rubric scores and a student-facing comment, plus a private rationale for you.
 4. `list_staged` / `post_staged_grades` (preview): **you review**.
 5. `post_staged_grades` with `confirm=true`: grades and comments go to Canvas.
@@ -96,6 +96,7 @@ If the assignment posts grades automatically, students see them immediately once
 | `get_assignment` | no | Description, rubric, points, dates, late policy, posting policy |
 | `list_submissions` | no | Students' submission status, lateness, scores (filter: needs_grading, late, missing, …) |
 | `get_submission` | no | A student's work as text, lateness, previous comments |
+| `get_submission_images` | no | Screenshots, photos and scanned pages from the submitted files, as images the AI can look at |
 | `stage_grade` | no | Save a proposed grade/rubric/comment locally |
 | `list_staged` / `discard_staged` | no | Review or drop staged grades |
 | `post_staged_grades` | **yes** (with `confirm=true`) | Send staged grades and comments to Canvas |
@@ -114,7 +115,7 @@ If the assignment posts grades automatically, students see them immediately once
 
 - **Anonymous and moderated** assignments are read-only (grade them in SpeedGrader).
 - Classic quizzes, discussions, annotations, LTI tools, and audio/video submissions aren't converted to text; the tool points you to SpeedGrader.
-- Scanned PDFs and images have no extractable text.
+- Videos (and video links) can't be watched; the tool only shows that a link or file exists.
 - Account admins without a course enrollment aren't listed by `list_grading_courses`.
 
 ## Development

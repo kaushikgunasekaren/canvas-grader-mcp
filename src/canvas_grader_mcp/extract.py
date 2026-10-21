@@ -63,6 +63,7 @@ def html_to_text(html: str | None) -> str:
     parser.feed(html)
     text = "".join(parser.parts)
     text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"^([ \t]*-)[ \t]*\n+[ \t]*", r"\1 ", text, flags=re.M)  # <li><p>..</p></li>
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -77,22 +78,32 @@ def extract_file(path: Path) -> dict:
     ext = path.suffix.lower()
     try:
         if ext == ".pdf":
-            from pypdf import PdfReader
+            import pypdfium2 as pdfium
 
-            reader = PdfReader(str(path))
-            pages = [f"--- page {i + 1} ---\n{(p.extract_text() or '').strip()}" for i, p in enumerate(reader.pages)]
+            pdf = pdfium.PdfDocument(str(path))
+            pages, image_pages = [], []
+            for i, page in enumerate(pdf):
+                text = page.get_textpage().get_text_range().replace("\r\n", "\n").strip()
+                images = count_pdf_images(page)
+                marker = f" [{images} image(s) - see get_submission_images]" if images else ""
+                if images:
+                    image_pages.append(i + 1)
+                pages.append(f"--- page {i + 1}{marker} ---\n{text}")
             text = "\n\n".join(pages)
-            note = None if text.replace("-", "").strip() else "No extractable text (scanned PDF?). Open it in SpeedGrader."
-            return {"kind": "pdf", "pages": len(reader.pages), "text": truncate(text), "note": note}
+            has_text = any(p.split("---\n", 1)[-1].strip() for p in pages)
+            note = None if has_text else "No extractable text (scanned PDF?); use get_submission_images."
+            return {"kind": "pdf", "pages": len(pdf), "pages_with_images": image_pages, "text": truncate(text), "note": note}
         if ext == ".docx":
             import docx
 
             doc = docx.Document(str(path))
+            images = sum(1 for rel in doc.part.rels.values() if "image" in rel.reltype)
             lines = [p.text for p in doc.paragraphs]
             for table in doc.tables:
                 for row in table.rows:
                     lines.append(" | ".join(cell.text for cell in row.cells))
-            return {"kind": "docx", "text": truncate("\n".join(lines))}
+            note = f"Contains {images} embedded image(s); see get_submission_images." if images else None
+            return {"kind": "docx", "images": images, "text": truncate("\n".join(lines)), "note": note}
         if ext == ".ipynb":
             nb = json.loads(path.read_text(errors="replace"))
             cells = []
@@ -109,10 +120,16 @@ def extract_file(path: Path) -> dict:
         if ext in TEXT_EXTENSIONS or _looks_like_text(path):
             return {"kind": "text", "text": truncate(path.read_text(errors="replace"))}
         if ext in IMAGE_EXTENSIONS:
-            return {"kind": "image", "note": "Image file; view it in SpeedGrader or open the local copy."}
+            return {"kind": "image", "note": "Image file; see get_submission_images."}
     except Exception as exc:  # a corrupt upload should not break grading the rest
         return {"kind": "error", "note": f"Could not read {path.name}: {exc}"}
     return {"kind": "binary", "note": f"Unsupported file type {ext or '(none)'}; review it in SpeedGrader."}
+
+
+def count_pdf_images(page) -> int:
+    import pypdfium2 as pdfium
+
+    return sum(1 for obj in page.get_objects(max_depth=2) if obj.type == pdfium.raw.FPDF_PAGEOBJ_IMAGE)
 
 
 def _looks_like_text(path: Path) -> bool:

@@ -54,11 +54,30 @@ SUB_ALICE = {
 SUB_BOB = {"user_id": 101, "user": {"sortable_name": "Roe, Bob"}, "workflow_state": "unsubmitted", "submitted_at": None, "missing": True}
 
 
+def make_png(color: str = "red", size: tuple[int, int] = (200, 120)) -> bytes:
+    from PIL import Image as PILImage
+
+    buf = io.BytesIO()
+    PILImage.new("RGB", size, color).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def make_pdf_with_image() -> bytes:
+    from PIL import Image as PILImage
+
+    buf = io.BytesIO()
+    PILImage.new("RGB", (300, 400), "blue").save(buf, "PDF")
+    return buf.getvalue()
+
+
 def make_docx() -> bytes:
     import docx
 
     doc = docx.Document()
     doc.add_paragraph("My report on fizzbuzz.")
+    doc.add_picture(io.BytesIO(make_png("red")))
+    doc.add_picture(io.BytesIO(make_png("red")))  # duplicate screenshot, should be returned once
+    doc.add_picture(io.BytesIO(make_png("green", (20, 20))))  # icon-sized, should be skipped
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -221,3 +240,29 @@ def test_configure_rejects_blank_token(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="No access token"):
         server.configure(["--url", "canvas.test"])
     assert not (tmp_path / "c.json").exists()
+
+
+def test_submission_images(fake):
+    from mcp.server.mcpserver import Image
+
+    sub = server.get_submission(1, 10, 100)
+    assert "get_submission_images" in sub["content"]["visual_content"]
+    out = server.get_submission_images(1, 10, 100)
+    assert isinstance(out[0], str) and "1 image(s)" in out[0]
+    assert len(out) == 2 and isinstance(out[1], Image)
+
+
+def test_pdf_pages_with_images_are_rendered(tmp_path):
+    from canvas_grader_mcp.extract import extract_file
+    from canvas_grader_mcp.images import collect
+
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(make_pdf_with_image())
+    info = extract_file(pdf)
+    assert info["pages_with_images"] == [1] and "scanned" in info["note"]
+    found, total = collect([pdf], max_images=5)
+    assert total == 1 and found[0][0] == "scan.pdf page 1"
+
+
+def test_html_list_items_with_paragraphs():
+    assert html_to_text("<ul><li><p>Screenshots</p></li><li><p>Video</p></li></ul>") == "- Screenshots\n\n- Video"

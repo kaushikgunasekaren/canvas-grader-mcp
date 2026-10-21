@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import sys
 import webbrowser
@@ -18,6 +19,9 @@ from .extract import extract_file, html_to_text, truncate
 from .staging import StagingStore
 
 GRADER_ROLES = {"teacher", "ta", "designer"}
+
+# httpx logs every request (including URLs with student/course ids) at INFO.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 mcp = MCPServer(
     "canvas-grader",

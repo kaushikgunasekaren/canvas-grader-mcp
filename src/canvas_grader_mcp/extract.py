@@ -112,6 +112,9 @@ def extract_file(path: Path) -> dict:
                 marker = f" [{images} image(s) - see get_submission_images]" if images else ""
                 if images:
                     image_pages.append(i + 1)
+                links = pdf_links(pdf, page)
+                if links:  # e.g. a video link hidden behind "click here"
+                    text += "\n[hyperlinks on this page: " + ", ".join(links) + "]"
                 pages.append(f"--- page {i + 1}{marker} ---\n{text}")
             text = "\n\n".join(pages)
             has_text = any(p.split("---\n", 1)[-1].strip() for p in pages)
@@ -165,6 +168,27 @@ def extract_file(path: Path) -> dict:
     except Exception as exc:  # a corrupt upload should not break grading the rest
         return {"kind": "error", "note": f"Could not read {path.name}: {exc}"}
     return {"kind": "binary", "note": f"Unsupported file type {ext or '(none)'}; review it in SpeedGrader."}
+
+
+def pdf_links(pdf, page) -> list[str]:
+    """URLs of clickable links on a PDF page."""
+    import ctypes
+
+    import pypdfium2.raw as raw
+
+    urls: list[str] = []
+    pos, link = ctypes.c_int(0), raw.FPDF_LINK()
+    while raw.FPDFLink_Enumerate(page.raw, ctypes.byref(pos), ctypes.byref(link)):
+        action = raw.FPDFLink_GetAction(link)
+        if not action or raw.FPDFAction_GetType(action) != raw.PDFACTION_URI:
+            continue
+        size = raw.FPDFAction_GetURIPath(pdf.raw, action, None, 0)
+        buf = ctypes.create_string_buffer(size)
+        raw.FPDFAction_GetURIPath(pdf.raw, action, buf, size)
+        url = buf.value.decode(errors="replace")
+        if url and url not in urls:
+            urls.append(url)
+    return urls
 
 
 def count_pdf_images(page) -> int:

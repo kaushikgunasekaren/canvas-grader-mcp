@@ -242,12 +242,19 @@ def list_submissions(course_id: int, assignment_id: int, filter: Filter = "needs
 
 
 @mcp.tool()
-def get_submission(course_id: int, assignment_id: int, user_id: int, download_files: bool = True) -> dict:
+def get_submission(
+    course_id: int,
+    assignment_id: int,
+    user_id: int,
+    download_files: bool = True,
+    attempt: Annotated[int | None, Field(description="Read an earlier attempt (default: latest). See 'attempts' in the result.")] = None,
+) -> dict:
     """A student's submitted work as text (text entry, URL, PDF/DOCX/code/notebook files), lateness, previous comments and grade."""
     require_grader(course_id)
     c = client()
     a = c.assignment(course_id, assignment_id)
-    s = c.submission(course_id, assignment_id, user_id)
+    latest = c.submission(course_id, assignment_id, user_id)
+    s = pick_attempt(latest, attempt)
     content: dict[str, Any] = {"type": s.get("submission_type")}
     if s.get("body"):
         content["text"] = truncate(html_to_text(s["body"]))
@@ -274,23 +281,39 @@ def get_submission(course_id: int, assignment_id: int, user_id: int, download_fi
     if not s.get("submitted_at"):
         content["note"] = "Nothing submitted."
 
+    history = latest.get("submission_history") or []
     return {
-        "student": student_name(s),
+        "student": student_name(latest),
         "user_id": user_id,
         "attempt": s.get("attempt"),
-        "attempts_total": len(s.get("submission_history") or []),
+        "attempts_total": len(history),
+        "attempts": [
+            {"attempt": h.get("attempt"), "submitted_at": h.get("submitted_at"),
+             "files": [att.get("display_name") for att in h.get("attachments") or []]}
+            for h in history if h.get("submitted_at")
+        ] if len(history) > 1 else None,
         "workflow_state": s.get("workflow_state"),
         "lateness": lateness.analyze(s, a, c.late_policy(course_id)),
         "content": content,
-        "current_grade": {"score": s.get("score"), "grade": s.get("grade"), "entered_score": s.get("entered_score")},
-        "rubric_assessment": s.get("rubric_assessment"),
+        "current_grade": {"score": latest.get("score"), "grade": latest.get("grade"), "entered_score": latest.get("entered_score")},
+        "rubric_assessment": latest.get("rubric_assessment"),
         "previous_comments": [
             {"author": cm.get("author_name"), "at": cm.get("created_at"), "text": cm.get("comment")}
-            for cm in s.get("submission_comments") or []
+            for cm in latest.get("submission_comments") or []
         ],
         "points_possible": a.get("points_possible"),
         "speedgrader_url": c.speedgrader_url(course_id, assignment_id, user_id),
     }
+
+
+def pick_attempt(sub: dict, attempt: int | None) -> dict:
+    """The submission as it was at a given attempt (attachments, body, dates); latest if None."""
+    if attempt is None or attempt == sub.get("attempt"):
+        return sub
+    for h in sub.get("submission_history") or []:
+        if h.get("attempt") == attempt:
+            return {**h, "user": sub.get("user")}
+    raise ToolError(f"No attempt {attempt}; this student has attempts {[h.get('attempt') for h in sub.get('submission_history') or []]}.")
 
 
 def download_attachment(course_id: int, assignment_id: int, user_id: int, att: dict) -> Path | None:
@@ -308,6 +331,7 @@ def get_submission_images(
     assignment_id: int,
     user_id: int,
     max_images: Annotated[int, Field(ge=1, le=30)] = 12,
+    attempt: int | None = None,
 ) -> list:
     """Screenshots, photos and scanned pages from a student's submitted files, as images.
 
@@ -315,7 +339,7 @@ def get_submission_images(
     in Word files and uploaded image files are returned directly. Duplicates are skipped.
     """
     require_grader(course_id)
-    s = client().submission(course_id, assignment_id, user_id)
+    s = pick_attempt(client().submission(course_id, assignment_id, user_id), attempt)
     paths = [p for att in s.get("attachments") or [] if (p := download_attachment(course_id, assignment_id, user_id, att))]
     found, total = images.collect(paths, max_images)
     if not found:

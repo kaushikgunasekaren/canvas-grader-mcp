@@ -43,7 +43,7 @@ SUB_ALICE = {
     "cached_due_date": "2026-10-01T06:59:59Z",
     "late": True,
     "seconds_late": 2 * 86400 - 100,
-    "attempt": 1,
+    "attempt": 2,
     "body": "<p>See attached.</p>",
     "attachments": [
         {"id": 7, "filename": "fizz.py", "display_name": "fizz.py", "url": "https://files.test/7?verifier=x", "size": 40},
@@ -51,6 +51,10 @@ SUB_ALICE = {
     ],
     "submission_comments": [],
 }
+SUB_ALICE["submission_history"] = [
+    {"attempt": 1, "submitted_at": "2026-09-30T12:00:00Z", "late": False, "seconds_late": 0, "body": "<p>First try</p>", "attachments": []},
+    {k: v for k, v in SUB_ALICE.items() if k != "submission_history"},
+]
 SUB_BOB = {"user_id": 101, "user": {"sortable_name": "Roe, Bob"}, "workflow_state": "unsubmitted", "submitted_at": None, "missing": True}
 
 
@@ -174,7 +178,7 @@ def test_stage_preview_and_post(fake):
     assert preview["count"] == 1 and not fake.puts  # preview never writes
     result = server.post_staged_grades(1, 10, confirm=True)
     assert result["posted"][0]["points_deducted"] == 2.0
-    assert fake.puts == [{"submission[posted_grade]": "9", "comment[text_comment]": "Add unit tests for 15.", "comment[attempt]": "1"}]
+    assert fake.puts == [{"submission[posted_grade]": "9", "comment[text_comment]": "Add unit tests for 15.", "comment[attempt]": "2"}]
     assert server.list_staged() == []
 
 
@@ -287,3 +291,38 @@ def test_zip_submission(tmp_path):
     assert not (tmp_path / "evil.txt").exists() and not (tmp_path / "lab.zip.d" / "Lab" / "video.mp4").exists()
     found, _ = collect([z], 5)
     assert [label for label, _ in found] == ["report.pdf page 1"]
+
+
+def make_pdf_with_link(url: str) -> bytes:
+    objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R] >>",
+        f"<< /Type /Annot /Subtype /Link /Rect [10 10 100 40] /A << /S /URI /URI ({url}) >> >>",
+    ]
+    out, offsets = b"%PDF-1.4\n", []
+    for i, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n{body}\nendobj\n".encode()
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
+    out += "".join(f"{o:010d} 00000 n \n" for o in offsets).encode()
+    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    return out
+
+
+def test_pdf_hyperlinks_are_extracted(tmp_path):
+    from canvas_grader_mcp.extract import extract_file
+
+    pdf = tmp_path / "video.pdf"
+    pdf.write_bytes(make_pdf_with_link("https://youtu.be/abc123"))
+    assert "https://youtu.be/abc123" in extract_file(pdf)["text"]
+
+
+def test_earlier_attempt(fake):
+    latest = server.get_submission(1, 10, 100)
+    assert [a["attempt"] for a in latest["attempts"]] == [1, 2]
+    first = server.get_submission(1, 10, 100, attempt=1)
+    assert first["attempt"] == 1 and first["content"]["text"] == "First try" and "files" not in first["content"]
+    with pytest.raises(ToolError, match="No attempt 7"):
+        server.get_submission(1, 10, 100, attempt=7)

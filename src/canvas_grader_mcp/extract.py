@@ -16,6 +16,30 @@ TEXT_EXTENSIONS = {
     ".tex", ".bib", ".css", ".scss", ".asm", ".s", ".v", ".sv", ".vhd", ".hs", ".ml", ".lua", ".pl", ".dart",
 }
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+MEDIA_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".mp3", ".m4a", ".wav"}
+MAX_MEMBER_BYTES = 100 * 1024 * 1024
+
+
+def unzip(path: Path) -> list[Path]:
+    """Safely extract a submitted .zip next to it; media files are listed but not extracted."""
+    import zipfile
+
+    dest = path.with_name(path.name + ".d")
+    out = []
+    with zipfile.ZipFile(path) as zf:
+        for info in zf.infolist():
+            name = Path(info.filename)
+            if info.is_dir() or name.is_absolute() or ".." in name.parts or name.parts[0] == "__MACOSX":
+                continue
+            target = dest / name
+            if name.suffix.lower() in MEDIA_EXTENSIONS or info.file_size > MAX_MEMBER_BYTES:
+                out.append(target)  # recorded, not extracted
+                continue
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(zf.read(info))
+            out.append(target)
+    return out
 
 
 class _HTMLToText(HTMLParser):
@@ -119,6 +143,23 @@ def extract_file(path: Path) -> dict:
             return {"kind": "html", "text": truncate(html_to_text(path.read_text(errors="replace")))}
         if ext in TEXT_EXTENSIONS or _looks_like_text(path):
             return {"kind": "text", "text": truncate(path.read_text(errors="replace"))}
+        if ext == ".zip":
+            import zipfile
+
+            sizes = {Path(i.filename).name: i.file_size for i in zipfile.ZipFile(path).infolist()}
+            members = []
+            for member in unzip(path):
+                entry = {"filename": str(member.relative_to(path.with_name(path.name + ".d"))), "size": sizes.get(member.name)}
+                if member.suffix.lower() in MEDIA_EXTENSIONS:
+                    entry.update(kind="media", note="Video/audio file inside the zip (not extracted, can't be watched here).")
+                elif member.exists():
+                    entry.update(extract_file(member))
+                else:
+                    entry.update(kind="skipped", note="Too large to extract.")
+                members.append(entry)
+            return {"kind": "zip", "members": members}
+        if ext in MEDIA_EXTENSIONS:
+            return {"kind": "media", "note": "Video/audio file: it was submitted, but can't be watched here."}
         if ext in IMAGE_EXTENSIONS:
             return {"kind": "image", "note": "Image file; see get_submission_images."}
     except Exception as exc:  # a corrupt upload should not break grading the rest

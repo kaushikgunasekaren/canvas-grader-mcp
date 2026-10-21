@@ -262,7 +262,8 @@ def get_submission(course_id: int, assignment_id: int, user_id: int, download_fi
         files.append(entry)
     if files:
         content["files"] = files
-        if any(f.get("pages_with_images") or f.get("images") or f.get("kind") == "image" for f in files):
+        flat = files + [m for f in files for m in f.get("members", [])]
+        if any(f.get("pages_with_images") or f.get("images") or f.get("kind") == "image" for f in flat):
             content["visual_content"] = (
                 "Screenshots/photos are embedded. They're not in the text above: call get_submission_images to see them before grading."
             )

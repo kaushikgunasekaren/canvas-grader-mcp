@@ -266,3 +266,24 @@ def test_pdf_pages_with_images_are_rendered(tmp_path):
 
 def test_html_list_items_with_paragraphs():
     assert html_to_text("<ul><li><p>Screenshots</p></li><li><p>Video</p></li></ul>") == "- Screenshots\n\n- Video"
+
+
+def test_zip_submission(tmp_path):
+    import zipfile
+
+    from canvas_grader_mcp.extract import extract_file
+    from canvas_grader_mcp.images import collect
+
+    z = tmp_path / "lab.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("Lab/report.pdf", make_pdf_with_image())
+        zf.writestr("Lab/notes.txt", "jump height 20mm")
+        zf.writestr("Lab/video.mp4", b"\x00" * 100)
+        zf.writestr("../evil.txt", "nope")
+        zf.writestr("__MACOSX/Lab/._notes.txt", "junk")
+    info = extract_file(z)
+    kinds = {m["filename"]: m["kind"] for m in info["members"]}
+    assert kinds == {"Lab/report.pdf": "pdf", "Lab/notes.txt": "text", "Lab/video.mp4": "media"}
+    assert not (tmp_path / "evil.txt").exists() and not (tmp_path / "lab.zip.d" / "Lab" / "video.mp4").exists()
+    found, _ = collect([z], 5)
+    assert [label for label, _ in found] == ["report.pdf page 1"]

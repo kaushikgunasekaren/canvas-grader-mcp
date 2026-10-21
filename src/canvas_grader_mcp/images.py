@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PIL import Image as PILImage
 
-from .extract import IMAGE_EXTENSIONS, count_pdf_images
+from .extract import IMAGE_EXTENSIONS, count_pdf_images, unzip
 
 MAX_SIDE = 1400
 MIN_SIDE = 48  # skip icons, bullets and tracking pixels
@@ -50,6 +50,10 @@ def file_images(path: Path) -> list[tuple[str, PILImage.Image]]:
             for name in sorted(n for n in zf.namelist() if "/media/" in n):
                 if img := _open(zf.read(name)):
                     out.append((f"{path.name} {name.rsplit('/', 1)[-1]}", img))
+    elif ext == ".zip":
+        for member in unzip(path):
+            if member.exists():
+                out.extend(file_images(member))
     elif ext in IMAGE_EXTENSIONS or ext in (".heic", ".tif", ".tiff"):
         if img := _open(path.read_bytes()):
             out.append((path.name, img))

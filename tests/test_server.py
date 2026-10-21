@@ -15,6 +15,7 @@ from canvas_grader_mcp import lateness, server
 from canvas_grader_mcp.canvas import CanvasClient
 from canvas_grader_mcp.config import Settings, normalize_base_url
 from canvas_grader_mcp.extract import html_to_text
+from canvas_grader_mcp.guidelines import GuidelineStore, LateTier, tier_penalty
 from canvas_grader_mcp.staging import StagingStore
 
 BASE = "https://canvas.test"
@@ -55,6 +56,11 @@ SUB_ALICE["submission_history"] = [
     {"attempt": 1, "submitted_at": "2026-09-30T12:00:00Z", "late": False, "seconds_late": 0, "body": "<p>First try</p>", "attachments": []},
     {k: v for k, v in SUB_ALICE.items() if k != "submission_history"},
 ]
+SUB_CAROL = {
+    "user_id": 102, "user": {"sortable_name": "Poe, Carol"}, "workflow_state": "submitted",
+    "submitted_at": "2026-09-30T12:00:00Z", "late": False, "seconds_late": 0, "attempt": 1,
+    "attachments": [{"id": 9, "filename": "fizz.py", "display_name": "fizz.py", "url": "https://files.test/7?verifier=z", "size": 40}],
+}
 SUB_BOB = {"user_id": 101, "user": {"sortable_name": "Roe, Bob"}, "workflow_state": "unsubmitted", "submitted_at": None, "missing": True}
 
 
@@ -118,7 +124,7 @@ class FakeCanvas:
             return httpx.Response(200, json=self.assignment)
         if api == "/courses/1/assignments/10/submissions":
             if url.params.get("page") == "2":
-                return httpx.Response(200, json=[SUB_BOB])
+                return httpx.Response(200, json=[SUB_BOB, SUB_CAROL])
             return httpx.Response(200, json=[SUB_ALICE], headers={"Link": f'<{BASE}/api/v1/courses/1/assignments/10/submissions?page=2>; rel="next"'})
         if api == "/courses/1/assignments/10/submissions/100":
             if method == "PUT":
@@ -136,6 +142,7 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_client", CanvasClient(Settings(BASE, "tok"), transport=httpx.MockTransport(canvas)))
     monkeypatch.setattr(server, "_grader_ok", {})
     monkeypatch.setattr(server, "staging", StagingStore(tmp_path / "staged.json"))
+    monkeypatch.setattr(server, "guideline_store", GuidelineStore(tmp_path / "guidelines.json"))
     return canvas
 
 
@@ -155,9 +162,9 @@ def test_assignment_details(fake):
 
 
 def test_list_submissions_paginates_and_filters(fake):
-    assert server.list_submissions(1, 10, "all")["count"] == 2
+    assert server.list_submissions(1, 10, "all")["count"] == 3
     pending = server.list_submissions(1, 10)["submissions"]
-    assert [s["student"] for s in pending] == ["Doe, Alice"]
+    assert [s["student"] for s in pending] == ["Doe, Alice", "Poe, Carol"]
     assert pending[0]["days_late"] == 2
     assert server.list_submissions(1, 10, "missing")["submissions"][0]["student"] == "Roe, Bob"
 
@@ -326,3 +333,94 @@ def test_earlier_attempt(fake):
     assert first["attempt"] == 1 and first["content"]["text"] == "First try" and "files" not in first["content"]
     with pytest.raises(ToolError, match="No attempt 7"):
         server.get_submission(1, 10, 100, attempt=7)
+
+
+LAB_TIERS = [LateTier(under_days=1, percent=0), LateTier(under_days=7, percent=5, min_points=1), LateTier(under_days=None, percent=10, min_points=3)]
+
+
+@pytest.mark.parametrize("days,points,expected", [
+    (0.02, 100, 0), (0.9, 100, 0), (1.5, 100, 5), (6.5, 100, 5), (8, 100, 10),
+    (3, 10, 1), (8, 10, 3), (3, 50, 3), (3, 20, 1),
+])
+def test_late_tiers(days, points, expected):
+    assert tier_penalty(int(days * 86400), points, LAB_TIERS)["points"] == expected
+
+
+def test_guidelines_flow_into_assignment_and_lateness(fake):
+    server.set_grading_guidelines(1, guidelines="Be lenient.", late_penalty_tiers=LAB_TIERS)
+    assert server.get_assignment(1, 10)["grading_guidelines"]["guidelines"] == "Be lenient."
+    late = server.get_submission(1, 10, 100)["lateness"]  # Alice: ~2 days late, but course 1 has an automatic policy
+    assert late["automatic_deduction"]["points"] == 2.0 and "suggested_penalty" not in late
+    manual = server.lateness.analyze({"late": True, "seconds_late": 2 * 86400}, {"points_possible": 10}, None, tiers=LAB_TIERS)
+    assert manual["suggested_penalty"]["points"] == 1 and "late tiers" in manual["note"]
+
+
+def test_stage_with_breakdown(fake):
+    from canvas_grader_mcp.breakdown import Adjustment, Category
+
+    cats = [Category(name="Program", earned=15, max=20, reason="no forever loop"), Category(name="Video", earned=10, max=10)]
+    r = server.stage_grade(1, 10, 100, rationale="r", comment="Nice work.", breakdown=cats,
+                           late_penalty=Adjustment(points=1, reason="2 days late"), extra_credit=[Adjustment(points=3, reason="Python")])
+    assert r["grade"] == "27"
+    assert r["comment"].splitlines() == [
+        "Nice work.", "", "Score breakdown:", "- Program: 15/20 (no forever loop)", "- Video: 10/10",
+        "- Late penalty: -1 (2 days late)", "- Extra credit: +3 (Python)", "Total: 27/30"]
+    with pytest.raises(ToolError, match="doesn't match"):
+        server.stage_grade(1, 10, 100, rationale="r", grade=5, breakdown=cats)
+    with pytest.raises(ToolError, match="more than the category maximum"):
+        server.stage_grade(1, 10, 100, rationale="r", breakdown=[Category(name="Video", earned=11, max=10)])
+
+
+def test_find_shared_files(fake):
+    groups = server.find_shared_files(1, 10)
+    assert [sorted(s["student"] for s in g["students"]) for g in groups] == [["Doe, Alice", "Poe, Carol"]]
+
+
+def test_sb3_projects_are_listed(tmp_path):
+    import zipfile
+
+    from canvas_grader_mcp.extract import extract_file
+
+    blocks = {
+        "a": {"opcode": "event_whenflagclicked", "next": "b", "topLevel": True},
+        "b": {"opcode": "control_forever", "next": None, "inputs": {"SUBSTACK": [2, "c"]}},
+        "c": {"opcode": "motion_movesteps", "next": "d", "inputs": {"STEPS": [1, [4, "10"]]}},
+        "d": {"opcode": "looks_seteffectto", "next": None, "fields": {"EFFECT": ["COLOR", None]}},
+    }
+    sb3 = tmp_path / "lab.sb3"
+    with zipfile.ZipFile(sb3, "w") as zf:
+        zf.writestr("project.json", json.dumps({"targets": [{"name": "Sprite1", "blocks": blocks}]}))
+    assert extract_file(sb3)["text"].splitlines() == [
+        "--- Sprite1 script 1 ---", "event_whenflagclicked", "control_forever", "  do:",
+        "    motion_movesteps STEPS=10", "    looks_seteffectto EFFECT=COLOR"]
+
+
+def test_qr_codes_are_decoded(tmp_path):
+    import zxingcpp
+    from PIL import Image as PILImage
+
+    from canvas_grader_mcp.images import qr_codes
+
+    code = zxingcpp.create_barcode("https://youtu.be/demo", zxingcpp.BarcodeFormat.QRCode).to_image(scale=6)
+    page = PILImage.new("L", (600, 400), 255)
+    page.paste(PILImage.frombuffer("L", (code.shape[1], code.shape[0]), bytes(code)), (50, 50))
+    page.save(tmp_path / "video.png")
+    assert [c["text"] for c in qr_codes([tmp_path / "video.png"])] == ["https://youtu.be/demo"]
+
+
+def test_linked_google_docs(fake, monkeypatch, tmp_path):
+    from canvas_grader_mcp import linked
+
+    url = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcd/edit?usp=sharing"
+    assert linked.google_links(f"see {url} and {url}") == [("document", "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcd", url.split("/edit")[0])]
+
+    def fake_fetch(kind, doc_id, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(make_pdf_with_link("https://youtu.be/inside"))
+        return dest, None
+
+    monkeypatch.setattr(linked, "fetch", fake_fetch)
+    files = server.linked_documents(1, 10, 100, f"my work: {url}")
+    assert files[0]["kind"] == "pdf" and "youtu.be/inside" in files[0]["text"] and "live Google link" in files[0]["note"]
+    monkeypatch.setattr(linked, "fetch", lambda *a: (None, "not publicly shared"))
+    assert "not publicly shared" in server.linked_documents(1, 10, 100, url)[0]["note"]

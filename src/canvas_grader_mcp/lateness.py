@@ -37,7 +37,8 @@ def describe_policy(policy: dict | None) -> dict:
     }
 
 
-def analyze(submission: dict, assignment: dict, policy: dict | None, raw_score: float | None = None) -> dict:
+def analyze(submission: dict, assignment: dict, policy: dict | None, raw_score: float | None = None,
+            tiers: list | None = None) -> dict:
     """Lateness facts for one submission, plus the automatic deduction Canvas would apply to raw_score."""
     due = submission.get("cached_due_date") or assignment.get("due_at")
     submitted = submission.get("submitted_at")
@@ -79,8 +80,17 @@ def analyze(submission: dict, assignment: dict, policy: dict | None, raw_score: 
         }
     elif late:
         info["automatic_deduction"] = None
-        info["note"] = (
-            "No automatic late policy: Canvas will not deduct anything. Apply any late penalty stated in the "
-            "assignment description/syllabus yourself and say so in the comment."
-        )
+        if tiers:
+            from .guidelines import tier_penalty
+
+            info["suggested_penalty"] = tier_penalty(seconds_late, points_possible, tiers)
+            info["note"] = (
+                "No automatic Canvas late policy; apply suggested_penalty from this course's late tiers yourself "
+                "(unless the student had an extension) and say so in the comment."
+            )
+        else:
+            info["note"] = (
+                "No automatic late policy: Canvas will not deduct anything. Apply any late penalty stated in the "
+                "assignment description/syllabus yourself and say so in the comment."
+            )
     return info

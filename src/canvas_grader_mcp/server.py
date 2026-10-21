@@ -13,10 +13,12 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from . import images, lateness
+from . import images, lateness, linked
+from .breakdown import Adjustment, Category, build as build_breakdown
 from .canvas import CanvasClient
 from .config import ConfigError, Settings, cache_dir
-from .extract import extract_file, html_to_text, truncate
+from .extract import MEDIA_EXTENSIONS, extract_file, html_to_text, truncate
+from .guidelines import GuidelineStore, LateTier
 from .staging import StagingStore
 
 GRADER_ROLES = {"teacher", "ta", "designer"}
@@ -28,14 +30,17 @@ mcp = MCPServer(
     "canvas-grader",
     instructions=(
         "Grades Canvas LMS submissions for courses where the user is a teacher or TA. "
-        "Workflow: list_grading_courses -> list_assignments -> get_assignment (read the description, rubric and "
-        "late policy) -> list_submissions -> get_submission for each student (plus get_submission_images whenever it "
+        "Workflow: list_grading_courses -> list_assignments -> get_assignment (read the description, rubric, "
+        "late policy and the course's grading_guidelines, and follow those guidelines over these defaults) -> list_submissions -> get_submission for each student (plus get_submission_images whenever it "
         "reports visual content: screenshots of code/programs are often most of the grade) -> stage_grade -> show the user the "
         "staged grades -> post_staged_grades with confirm=true only after the user approves. "
+        "Grade each student on what they themselves submitted. Use stage_grade's breakdown (one entry per grading "
+        "category in the description) so the student sees where points were lost. "
         "Base every point deduction on the assignment description or rubric and say in the comment exactly what "
         "is missing or wrong and how to fix it. Keep comments constructive and addressed to the student. "
         "If a course has an automatic late policy, stage the raw score: Canvas deducts late points itself. "
-        "Otherwise apply only the late penalty the description/syllabus states, and mention it in the comment. "
+        "Otherwise use lateness.suggested_penalty (from the course's late tiers) or the penalty the description/"
+        "syllabus states, as stage_grade's late_penalty. "
         "Never post grades or comments without the user's explicit go-ahead."
     ),
 )
@@ -43,6 +48,7 @@ mcp = MCPServer(
 _client: CanvasClient | None = None
 _grader_ok: dict[int, bool] = {}
 staging = StagingStore()
+guideline_store = GuidelineStore()
 
 
 def client() -> CanvasClient:
@@ -178,6 +184,7 @@ def get_assignment(course_id: int, assignment_id: int) -> dict:
             for o in a.get("overrides") or []
         ],
         "late_policy": lateness.describe_policy(c.late_policy(course_id)),
+        "grading_guidelines": guideline_store.get(course_id) or "None saved for this course (see set_grading_guidelines).",
         "rubric": rubric,
         "rubric_used_for_grading": bool(a.get("use_rubric_for_grading")),
         "rubric_points_possible": (a.get("rubric_settings") or {}).get("points_possible"),
@@ -207,6 +214,7 @@ def list_submissions(course_id: int, assignment_id: int, filter: Filter = "needs
     c = client()
     a = c.assignment(course_id, assignment_id)
     policy = c.late_policy(course_id)
+    tiers = guideline_store.late_tiers(course_id)
     staged = {e["user_id"] for e in staging.list(course_id, assignment_id)}
     checks = {
         "all": lambda s: True,
@@ -221,7 +229,7 @@ def list_submissions(course_id: int, assignment_id: int, filter: Filter = "needs
     for s in c.submissions(course_id, assignment_id):
         if not checks[filter](s):
             continue
-        late = lateness.analyze(s, a, policy)
+        late = lateness.analyze(s, a, policy, tiers=tiers)
         rows.append({
             "user_id": s["user_id"],
             "student": student_name(s),
@@ -248,8 +256,9 @@ def get_submission(
     user_id: int,
     download_files: bool = True,
     attempt: Annotated[int | None, Field(description="Read an earlier attempt (default: latest). See 'attempts' in the result.")] = None,
+    fetch_links: Annotated[bool, Field(description="Download publicly shared Google Docs/Slides/Sheets the student linked instead of uploading")] = True,
 ) -> dict:
-    """A student's submitted work as text (text entry, URL, PDF/DOCX/code/notebook files), lateness, previous comments and grade."""
+    """A student's submitted work as text (text entry, URL, PDF/DOCX/code/notebook/.sb3 files, linked Google Docs), QR-code links, lateness, previous comments and grade."""
     require_grader(course_id)
     c = client()
     a = c.assignment(course_id, assignment_id)
@@ -267,6 +276,13 @@ def get_submission(
             entry["local_path"] = str(dest)
             entry.update(extract_file(dest))
         files.append(entry)
+    if download_files and fetch_links:
+        text_so_far = " ".join([s.get("body") or "", s.get("url") or ""] + [f.get("text") or "" for f in files])
+        files.extend(linked_documents(course_id, assignment_id, user_id, text_so_far))
+    if download_files:
+        visual = [Path(f["local_path"]) for f in files if f.get("local_path") and Path(f["local_path"]).suffix.lower() not in MEDIA_EXTENSIONS]
+        if codes := images.qr_codes(visual):
+            content["qr_codes"] = codes
     if files:
         content["files"] = files
         flat = files + [m for f in files for m in f.get("members", [])]
@@ -293,7 +309,7 @@ def get_submission(
             for h in history if h.get("submitted_at")
         ] if len(history) > 1 else None,
         "workflow_state": s.get("workflow_state"),
-        "lateness": lateness.analyze(s, a, c.late_policy(course_id)),
+        "lateness": lateness.analyze(s, a, c.late_policy(course_id), tiers=guideline_store.late_tiers(course_id)),
         "content": content,
         "current_grade": {"score": latest.get("score"), "grade": latest.get("grade"), "entered_score": latest.get("entered_score")},
         "rubric_assessment": latest.get("rubric_assessment"),
@@ -316,6 +332,33 @@ def pick_attempt(sub: dict, attempt: int | None) -> dict:
     raise ToolError(f"No attempt {attempt}; this student has attempts {[h.get('attempt') for h in sub.get('submission_history') or []]}.")
 
 
+def linked_documents(course_id: int, assignment_id: int, user_id: int, text: str) -> list[dict]:
+    """Fetch public Google Docs/Slides/Sheets linked in the submission and extract them like uploaded files."""
+    out = []
+    for kind, doc_id, url in linked.google_links(text):
+        dest = cache_dir() / str(course_id) / str(assignment_id) / str(user_id) / f"linked-{doc_id}.pdf"
+        path, problem = linked.fetch(kind, doc_id, dest)
+        entry: dict[str, Any] = {"filename": f"linked Google {kind}", "source_url": url}
+        if path is None:
+            entry.update(kind="link", note=f"Linked Google {kind} {problem}.")
+        else:
+            entry["local_path"] = str(path)
+            entry.update(extract_file(path))
+            entry["note"] = (entry.get("note") or "") + (
+                " Fetched from a live Google link: it may have been edited after the submission time (check its version history)."
+            )
+        out.append(entry)
+    return out
+
+
+def submission_paths(course_id: int, assignment_id: int, user_id: int, s: dict) -> list[Path]:
+    """Local copies of everything the student submitted, including linked public Google files."""
+    paths = [p for att in s.get("attachments") or [] if (p := download_attachment(course_id, assignment_id, user_id, att))]
+    text = " ".join([s.get("body") or "", s.get("url") or ""])
+    paths += [Path(f["local_path"]) for f in linked_documents(course_id, assignment_id, user_id, text) if f.get("local_path")]
+    return paths
+
+
 def download_attachment(course_id: int, assignment_id: int, user_id: int, att: dict) -> Path | None:
     if not att.get("url"):
         return None
@@ -332,6 +375,7 @@ def get_submission_images(
     user_id: int,
     max_images: Annotated[int, Field(ge=1, le=30)] = 12,
     attempt: int | None = None,
+    detail: Annotated[Literal["normal", "high"], Field(description="'high' renders at twice the resolution, for small text or blurry photos")] = "normal",
 ) -> list:
     """Screenshots, photos and scanned pages from a student's submitted files, as images.
 
@@ -340,14 +384,59 @@ def get_submission_images(
     """
     require_grader(course_id)
     s = pick_attempt(client().submission(course_id, assignment_id, user_id), attempt)
-    paths = [p for att in s.get("attachments") or [] if (p := download_attachment(course_id, assignment_id, user_id, att))]
-    found, total = images.collect(paths, max_images)
+    paths = submission_paths(course_id, assignment_id, user_id, s)
+    found, total = images.collect(paths, max_images, max_side=2800 if detail == "high" else images.MAX_SIDE)
     if not found:
         return [f"No images found in {student_name(s)}'s submitted files."]
     header = f"{student_name(s)}: {len(found)} image(s)" + (f" of {total}; raise max_images to see the rest" if total > len(found) else "")
     out: list[Any] = [header + ". In order: " + "; ".join(label for label, _ in found)]
     out.extend(Image(data=data, format="jpeg") for _, data in found)
     return out
+
+
+@mcp.tool()
+def find_shared_files(course_id: int, assignment_id: int) -> list[dict]:
+    """Groups of students who submitted byte-identical files (team or copied work), so identical work can be graded consistently.
+
+    Downloads every submission's non-video attachments to the local cache.
+    """
+    import hashlib
+
+    require_grader(course_id)
+    groups: dict[str, dict] = {}
+    for s in client().submissions(course_id, assignment_id):
+        for att in s.get("attachments") or []:
+            name = att.get("display_name") or att.get("filename") or ""
+            if Path(name).suffix.lower() in MEDIA_EXTENSIONS or (att.get("size") or 0) > 50 * 1024 * 1024:
+                continue
+            path = download_attachment(course_id, assignment_id, s["user_id"], att)
+            if path is None:
+                continue
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            group = groups.setdefault(digest, {"file": name, "students": []})
+            who = {"user_id": s["user_id"], "student": student_name(s)}
+            if who not in group["students"]:
+                group["students"].append(who)
+    return [g for g in groups.values() if len(g["students"]) > 1]
+
+
+@mcp.tool()
+def set_grading_guidelines(
+    course_id: int,
+    guidelines: Annotated[str | None, Field(description="How this grader wants work graded (leniency, extra credit, what counts as evidence...). Shown with every assignment.")] = None,
+    late_penalty_tiers: Annotated[list[LateTier] | None, Field(description="Manual late scale, e.g. [{under_days: 1, percent: 0}, {under_days: 7, percent: 5, min_points: 1}, {under_days: null, percent: 10, min_points: 3}]")] = None,
+) -> dict:
+    """Save grading guidelines and a manual late-penalty scale for a course (stored only on this computer)."""
+    require_grader(course_id)
+    if guidelines is None and late_penalty_tiers is None:
+        raise ToolError("Give guidelines, late_penalty_tiers, or both.")
+    return guideline_store.set(course_id, guidelines, late_penalty_tiers)
+
+
+@mcp.tool()
+def get_grading_guidelines(course_id: int) -> dict:
+    """The saved grading guidelines and late-penalty tiers for a course."""
+    return guideline_store.get(course_id) or {"note": "None saved for this course."}
 
 
 # --- staging & posting ---------------------------------------------------------
@@ -423,12 +512,23 @@ def stage_grade(
     rubric: Annotated[dict[str, RubricScore] | None, Field(description="criterion_id -> {points, comments?, rating_id?}")] = None,
     excuse: bool = False,
     group_comment: Annotated[bool | None, Field(description="Group assignments: send the comment to every member (default yes)")] = None,
+    breakdown: Annotated[list[Category] | None, Field(description="One entry per grading category; the grade is computed from it and the comment gets a score breakdown. 'comment' becomes the opening sentence.")] = None,
+    late_penalty: Annotated[Adjustment | None, Field(description="Manual late penalty (with breakdown), e.g. {points: 5, reason: 'submitted 2 days late'}")] = None,
+    extra_credit: Annotated[list[Adjustment] | None, Field(description="Extra credit earned (with breakdown); omit when none")] = None,
+    note: Annotated[str | None, Field(description="Extra line at the end of the student comment (with breakdown)")] = None,
 ) -> dict:
     """Save a proposed grade/comment locally (nothing is sent to Canvas). Review with list_staged, send with post_staged_grades."""
     require_grader(course_id)
     c = client()
     a = c.assignment(course_id, assignment_id)
     writable(a)
+    if breakdown:
+        total, comment = build_breakdown(comment, breakdown, late_penalty, extra_credit, note)
+        if grade is not None and abs(float(grade) - total) > 1e-6:
+            raise ToolError(f"grade {grade} doesn't match the breakdown total {total:g}; pass only the breakdown.")
+        grade = f"{total:g}"
+    elif late_penalty or extra_credit or note:
+        raise ToolError("late_penalty, extra_credit and note are used with breakdown.")
     if grade is None and not rubric and not comment and not excuse:
         raise ToolError("Nothing to stage: give a grade, rubric scores, a comment, or excuse=true.")
     posted, warnings = normalize_grade(a, grade)
@@ -441,7 +541,7 @@ def stage_grade(
             posted = None  # Canvas derives the score from the rubric
     s = c.submission(course_id, assignment_id, user_id)
     raw = float(posted) if posted is not None and a.get("grading_type") == "points" else None
-    late = lateness.analyze(s, a, c.late_policy(course_id), raw_score=raw)
+    late = lateness.analyze(s, a, c.late_policy(course_id), raw_score=raw, tiers=guideline_store.late_tiers(course_id))
 
     entry = staging.put({
         "course_id": course_id,

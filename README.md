@@ -11,8 +11,11 @@ It reads each assignment's description, rubric, due dates and late policy, pulls
 
 - **Find your grading work**: every course where you're a teacher/TA with grading permission, assignments with how many submissions need grading.
 - **Understand the assignment**: description (as clean text), points, grading type, rubric criteria and ratings, per-student due dates (overrides and extensions), the course's automatic late policy.
-- **Read submissions**: text entries, URLs, and uploaded files: PDF, Word (.docx), Jupyter notebooks, source code and other text files. Screenshots and photos inside PDFs and Word files (and uploaded images) are passed to the AI as images, so program screenshots get graded too. Files are downloaded to a local cache only.
+- **Read submissions**: text entries, URLs, and uploaded files: PDF, Word (.docx), Jupyter notebooks, Scratch projects (.sb3), zip archives, source code and other text files; publicly shared Google Docs/Slides/Sheets the student linked instead of uploading; links hidden behind text in PDFs; and QR codes in screenshots. Screenshots and photos inside PDFs and Word files (and uploaded images) are passed to the AI as images, so program screenshots get graded too. Files are downloaded to a local cache only.
 - **Account for due dates**: how late each submission was. If the course has an automatic late policy, it shows the deduction Canvas will apply (so you enter the raw score); if not, it flags that any penalty from the syllabus must be applied by the grader.
+- **Your grading rules, per course**: save guidelines (how lenient to be, what earns extra credit, what counts as evidence) and a manual late-penalty scale for each course. They're stored only on your computer and shown to the assistant with every assignment in that course.
+- **Score breakdowns**: stage a grade as per-category scores plus late penalty and extra credit; the tool totals it and writes the breakdown into the student's comment.
+- **Consistency checks**: find students who submitted identical files, and read any earlier attempt when a student re-uploaded the wrong file.
 - **Stage → review → post**: grades, rubric scores and comments are staged locally, previewed, then posted only with explicit confirmation. Comments explain to the student what was missing.
 - **SpeedGrader links** for every submission, or open SpeedGrader directly in your browser.
 
@@ -84,6 +87,14 @@ The intended workflow is:
 4. `list_staged` / `post_staged_grades` (preview): **you review**.
 5. `post_staged_grades` with `confirm=true`: grades and comments go to Canvas.
 
+### Per-course grading guidelines
+
+Every course is graded differently, so rules live with the course, not in the tool. Tell the assistant once, for example:
+
+> "For course 12345, save these grading guidelines: be lenient on short answers, give +1 for each optional challenge completed, and require a screenshot of working code. Late penalty: nothing under 1 day late, 5% under a week, 10% after that (at least 3 points)."
+
+That calls `set_grading_guidelines`, which stores the rules in `~/.local/share/canvas-grader-mcp/guidelines.json` (owner-only). From then on, `get_assignment` includes them, and every late submission gets a `suggested_penalty` from your tiers. Different courses can have completely different rules.
+
 If the assignment posts grades automatically, students see them immediately once posted; the tool warns you. With a manual posting policy they stay hidden until you post them in the Gradebook or SpeedGrader.
 
 ## Tools
@@ -96,8 +107,10 @@ If the assignment posts grades automatically, students see them immediately once
 | `get_assignment` | no | Description, rubric, points, dates, late policy, posting policy |
 | `list_submissions` | no | Students' submission status, lateness, scores (filter: needs_grading, late, missing, …) |
 | `get_submission` | no | A student's work as text, lateness, previous comments |
-| `get_submission_images` | no | Screenshots, photos and scanned pages from the submitted files, as images the AI can look at |
-| `stage_grade` | no | Save a proposed grade/rubric/comment locally |
+| `get_submission_images` | no | Screenshots, photos and scanned pages from the submitted files, as images the AI can look at (`detail="high"` for small text) |
+| `find_shared_files` | no | Groups of students who submitted byte-identical files |
+| `set_grading_guidelines` / `get_grading_guidelines` | no (local) | Your per-course grading rules and late-penalty tiers |
+| `stage_grade` | no | Save a proposed grade/rubric/comment locally, optionally from a per-category breakdown |
 | `list_staged` / `discard_staged` | no | Review or drop staged grades |
 | `post_staged_grades` | **yes** (with `confirm=true`) | Send staged grades and comments to Canvas |
 | `post_comment` | **yes** (with `confirm=true`) | Comment on a submission without grading |

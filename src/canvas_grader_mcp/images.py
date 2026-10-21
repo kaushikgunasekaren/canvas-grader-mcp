@@ -15,9 +15,9 @@ MAX_SIDE = 1400
 MIN_SIDE = 48  # skip icons, bullets and tracking pixels
 
 
-def _encode(img: PILImage.Image) -> bytes:
+def _encode(img: PILImage.Image, max_side: int = MAX_SIDE) -> bytes:
     img = img.convert("RGB")
-    img.thumbnail((MAX_SIDE, MAX_SIDE))
+    img.thumbnail((max_side, max_side))
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=85)
     return buf.getvalue()
@@ -32,8 +32,8 @@ def _open(data: bytes) -> PILImage.Image | None:
     return img if min(img.size) >= MIN_SIDE else None
 
 
-def file_images(path: Path) -> list[tuple[str, PILImage.Image]]:
-    """(label, image) pairs for one submitted file."""
+def file_images(path: Path, max_side: int = MAX_SIDE) -> list[tuple[str, PILImage.Image]]:
+    """(label, image) pairs for one submitted file; PDF pages are rendered with max_side as the long edge."""
     ext = path.suffix.lower()
     out: list[tuple[str, PILImage.Image]] = []
     if ext == ".pdf":
@@ -43,7 +43,7 @@ def file_images(path: Path) -> list[tuple[str, PILImage.Image]]:
         for i, page in enumerate(pdf):
             text = page.get_textpage().get_text_range().strip()
             if count_pdf_images(page) or not text:  # screenshots/photos, or a scanned page
-                scale = MAX_SIDE / max(page.get_width(), page.get_height())
+                scale = max_side / max(page.get_width(), page.get_height())
                 out.append((f"{path.name} page {i + 1}", page.render(scale=scale).to_pil()))
     elif ext in (".docx", ".pptx", ".xlsx"):
         with zipfile.ZipFile(path) as zf:
@@ -53,23 +53,36 @@ def file_images(path: Path) -> list[tuple[str, PILImage.Image]]:
     elif ext == ".zip":
         for member in unzip(path):
             if member.exists():
-                out.extend(file_images(member))
+                out.extend(file_images(member, max_side))
     elif ext in IMAGE_EXTENSIONS or ext in (".heic", ".tif", ".tiff"):
         if img := _open(path.read_bytes()):
             out.append((path.name, img))
     return out
 
 
-def collect(paths: list[Path], max_images: int) -> tuple[list[tuple[str, bytes]], int]:
+def collect(paths: list[Path], max_images: int, max_side: int = MAX_SIDE) -> tuple[list[tuple[str, bytes]], int]:
     """Encoded, de-duplicated images across files, capped at max_images. Returns (images, total_found)."""
     seen: set[str] = set()
     found: list[tuple[str, bytes]] = []
     for path in paths:
-        for label, img in file_images(path):
-            data = _encode(img)
+        for label, img in file_images(path, max_side):
+            data = _encode(img, max_side)
             digest = hashlib.sha1(data).hexdigest()
             if digest in seen:
                 continue
             seen.add(digest)
             found.append((label, data))
     return found[:max_images], len(found)
+
+
+def qr_codes(paths: list[Path]) -> list[dict]:
+    """Text of QR codes/barcodes in submitted images and PDF pages (students often link videos this way)."""
+    import zxingcpp
+
+    found: list[dict] = []
+    for path in paths:
+        for label, img in file_images(path, max_side=2400):
+            for code in zxingcpp.read_barcodes(img.convert("RGB")):
+                if code.text and not any(f["text"] == code.text for f in found):
+                    found.append({"source": label, "text": code.text})
+    return found

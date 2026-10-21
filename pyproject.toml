@@ -1,6 +1,6 @@
 [project]
 name = "canvas-grader-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server that helps teachers and TAs grade Canvas LMS submissions and leave SpeedGrader feedback"
 readme = "README.md"
 license = "MIT"
@@ -19,6 +19,7 @@ dependencies = [
     "python-docx>=1.1",
     "pypdfium2>=5.14.0",
     "pillow>=12.3.0",
+    "zxing-cpp>=3.1.1",
 ]
 
 [project.scripts]

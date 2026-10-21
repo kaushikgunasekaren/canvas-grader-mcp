@@ -146,6 +146,8 @@ def extract_file(path: Path) -> dict:
             return {"kind": "html", "text": truncate(html_to_text(path.read_text(errors="replace")))}
         if ext in TEXT_EXTENSIONS or _looks_like_text(path):
             return {"kind": "text", "text": truncate(path.read_text(errors="replace"))}
+        if ext == ".sb3":
+            return {"kind": "blocks project", "text": truncate(describe_sb3(path))}
         if ext == ".zip":
             import zipfile
 
@@ -168,6 +170,47 @@ def extract_file(path: Path) -> dict:
     except Exception as exc:  # a corrupt upload should not break grading the rest
         return {"kind": "error", "note": f"Could not read {path.name}: {exc}"}
     return {"kind": "binary", "note": f"Unsupported file type {ext or '(none)'}; review it in SpeedGrader."}
+
+
+def describe_sb3(path: Path) -> str:
+    """Readable listing of a Scratch 3 project (.sb3, also used by Scratch-based tools): each script, nested by C-blocks."""
+    import zipfile
+
+    project = json.loads(zipfile.ZipFile(path).read("project.json"))
+    out: list[str] = []
+    for target in project.get("targets", []):
+        blocks = {k: b for k, b in (target.get("blocks") or {}).items() if isinstance(b, dict)}
+
+        def value(inp) -> str:
+            # inputs are [shadow_kind, literal-or-block-id, ...]; literals are [type, value]
+            for part in inp[1:]:
+                if isinstance(part, list) and len(part) >= 2:
+                    return str(part[1])
+                if isinstance(part, str) and part in blocks:
+                    return f"({label(part)})"
+            return "?"
+
+        def label(bid: str) -> str:
+            b = blocks[bid]
+            args = [f"{k}={v[0]}" for k, v in (b.get("fields") or {}).items()]
+            args += [f"{k}={value(v)}" for k, v in (b.get("inputs") or {}).items() if not k.startswith("SUBSTACK")]
+            return b.get("opcode", "?") + (" " + " ".join(args) if args else "")
+
+        def walk(bid: str | None, depth: int) -> None:
+            while bid and bid in blocks:
+                out.append("  " * depth + label(bid))
+                for key in ("SUBSTACK", "SUBSTACK2"):
+                    sub = (blocks[bid].get("inputs") or {}).get(key)
+                    if sub and len(sub) > 1 and isinstance(sub[1], str):
+                        out.append("  " * (depth + 1) + ("else:" if key == "SUBSTACK2" else "do:"))
+                        walk(sub[1], depth + 2)
+                bid = blocks[bid].get("next")
+
+        tops = [k for k, b in blocks.items() if b.get("topLevel") and not b.get("shadow")]
+        for i, top in enumerate(tops, 1):
+            out.append(f"--- {target.get('name', 'sprite')} script {i} ---")
+            walk(top, 0)
+    return "\n".join(out) or "(empty project)"
 
 
 def pdf_links(pdf, page) -> list[str]:

@@ -13,7 +13,7 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from . import images, lateness, linked, media
+from . import images, lateness, linked, media, webpage
 from .breakdown import Adjustment, Category, build as build_breakdown
 from .canvas import CanvasClient
 from .config import ConfigError, Settings, cache_dir
@@ -258,6 +258,7 @@ def get_submission(
     attempt: Annotated[int | None, Field(description="Read an earlier attempt (default: latest). See 'attempts' in the result.")] = None,
     fetch_links: Annotated[bool, Field(description="Download publicly shared Google Docs/Slides/Sheets the student linked instead of uploading")] = True,
     check_links: Annotated[bool, Field(description="Classify every link in the submission (video, photo, document, not_public...) so e.g. a photo link isn't mistaken for the required video")] = True,
+    read_page: Annotated[bool, Field(description="For website/URL submissions (e.g. a LinkedIn post), open the public page and include its text, photo count and video flag")] = True,
 ) -> dict:
     """A student's submitted work as text (text entry, URL, PDF/DOCX/code/notebook/.sb3 files, linked Google Docs), QR-code links, lateness, previous comments and grade."""
     require_grader(course_id)
@@ -270,6 +271,15 @@ def get_submission(
         content["text"] = truncate(html_to_text(s["body"]))
     if s.get("url"):
         content["url"] = s["url"]
+        if read_page:
+            try:
+                page = webpage.read(s["url"])
+                page["photos"] = len(page.pop("images", []) or [])
+                content["page"] = page
+                if page["photos"]:
+                    content["page_images"] = "Call view_webpage(url) to see the page's photos."
+            except webpage.PageError as exc:
+                content["page"] = {"error": str(exc)}
     files = []
     for att in s.get("attachments") or []:
         entry: dict[str, Any] = {"filename": att.get("display_name") or att.get("filename"), "size": att.get("size"), "content_type": att.get("content-type")}
@@ -402,6 +412,40 @@ def get_submission_images(
     header = f"{student_name(s)}: {len(found)} image(s)" + (f" of {total}; raise max_images to see the rest" if total > len(found) else "")
     out: list[Any] = [header + ". In order: " + "; ".join(label for label, _ in found)]
     out.extend(Image(data=data, format="jpeg") for _, data in found)
+    return out
+
+
+@mcp.tool()
+def view_webpage(
+    url: str,
+    include_images: bool = True,
+    max_images: Annotated[int, Field(ge=0, le=12)] = 6,
+) -> list:
+    """Open a public web page a student submitted (LinkedIn post, portfolio site, blog...) and return its text plus photos.
+
+    Reports title, author, date, main text, hashtags, photo count and whether it has a video (videos aren't played).
+    Pages are fetched without any login, so private or sign-in-only pages can't be read; local/private network
+    addresses are refused.
+    """
+    try:
+        page = webpage.read(url)
+    except webpage.PageError as exc:
+        raise ToolError(str(exc)) from exc
+    image_urls = page.pop("images", []) or []
+    page["photos"] = len(image_urls)
+    out: list[Any] = [page]
+    if include_images and image_urls:
+        from io import BytesIO
+
+        from PIL import Image as PILImage
+
+        for _, data in webpage.download_images(image_urls, max_images):
+            try:
+                pic = PILImage.open(BytesIO(data))
+                pic.load()
+            except Exception:
+                continue
+            out.append(Image(data=images._encode(pic), format="jpeg"))
     return out
 
 

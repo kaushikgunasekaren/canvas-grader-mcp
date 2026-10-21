@@ -509,3 +509,88 @@ def test_classify_links():
     assert kinds == {"https://drive.google.com/file/d/VIDEO/view": "video", "https://drive.google.com/file/d/PRIVATE/view": "not_public",
                      "https://photos.app.goo.gl/xyz": "video", "https://youtu.be/abc": "video", "https://example.com/page": "webpage"}
     assert find_urls("see https://youtu.be/abc. and (https://example.com/x)") == ["https://youtu.be/abc", "https://example.com/x"]
+
+
+LI_TEXT_POST = (
+    '<meta property="og:title" content="#robotics | Sam Student"><meta property="og:type" content="article">'
+    '<p class="attributed-text-segment-list__content text-color-text">Learned about automata in Professor X&#39;s class.<br>'
+    'Design, prototype, test.<br><a href="https://www.linkedin.com/feed/hashtag/robotics">#Robotics</a></p>'
+    '<img data-delayed-url="https://media.licdn.com/dms/image/v2/ABC/feedshare-shrink_800/0/1?e=1&amp;v=beta">'
+    '"datePublished":"2026-09-09T04:44:51Z"'
+)
+LI_VIDEO_POST = '<meta property="og:type" content="video.other"><meta property="og:description" content="Our conveyor lab #Dobot"><div class="video-js x"></div>'
+LI_ARTICLE = (
+    '<meta property="og:type" content="article">"articleBody":"Conveyor and AI vision labs.\\nThanks team! #Dobot",'
+    '"author":{"@type":"Person","name":"Pat Student"},'
+    '\\"https://media.licdn.com/dms/image/v2/IMG1/feedshare-\\",\\"imageRenditions\\":[{\\"width\\":160,\\"height\\":200,\\"suffixUrl\\":\\"shrink_160/a?e=1\\u0026t=x\\"},{\\"width\\":800,\\"height\\":900,\\"suffixUrl\\":\\"shrink_800/a?e=1\\u0026t=x\\"}],'
+    '\\"https://media.licdn.com/dms/image/v2/IMG2/feedshare-\\",\\"imageRenditions\\":[{\\"width\\":800,\\"height\\":600,\\"suffixUrl\\":\\"shrink_800/b?e=1\\"}]'
+)
+
+
+@pytest.fixture
+def web(monkeypatch):
+    from canvas_grader_mcp import webpage
+
+    pages = {
+        "https://www.linkedin.com/posts/text": (200, LI_TEXT_POST),
+        "https://www.linkedin.com/posts/video": (200, LI_VIDEO_POST),
+        "https://www.linkedin.com/posts/article": (200, LI_ARTICLE),
+        "https://example.edu/portfolio": (200, "<title>Portfolio</title><main><h1>My robot</h1><p>It sorts cubes.</p><video src='a.mp4'></video></main>"),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url == "https://lnkd.in/p/short":
+            return httpx.Response(302, headers={"Location": "https://www.linkedin.com/posts/text"})
+        if url == "https://lnkd.in/p/private":
+            return httpx.Response(302, headers={"Location": "https://www.linkedin.com/authwall?trk=x"})
+        if "media.licdn.com" in url:
+            return httpx.Response(200, content=make_png("red", (300, 200)), headers={"content-type": "image/png"})
+        status, body = pages.get(url, (404, "not found"))
+        return httpx.Response(status, text=body)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), headers={"User-Agent": "test"})
+    monkeypatch.setattr(webpage, "_check_public", lambda url: None)
+    real_fetch, real_download = webpage.fetch, webpage.download_images
+    monkeypatch.setattr(webpage, "fetch", lambda url, http=None: real_fetch(url, client))
+    monkeypatch.setattr(webpage, "download_images", lambda urls, limit, http=None: real_download(urls, limit, client))
+    return webpage
+
+
+def test_linkedin_text_post(web):
+    page = web.read("https://lnkd.in/p/short")
+    assert page["final_url"] == "https://www.linkedin.com/posts/text" and page["site"] == "linkedin"
+    assert page["text"] == "Learned about automata in Professor X's class.\nDesign, prototype, test.\n#Robotics"
+    assert page["hashtags"] == ["#Robotics"] and len(page["images"]) == 1 and not page["has_video"]
+    assert page["author"] == "Sam Student" and page["published"].startswith("2026-09-09")
+
+
+def test_linkedin_video_and_article_posts(web):
+    video = web.read("https://www.linkedin.com/posts/video")
+    assert video["has_video"] and video["text"] == "Our conveyor lab #Dobot"
+    assert web._linkedin('<meta property="og:type" content="article"><video data-sources="[]"></video>')["has_video"]
+    article = web.read("https://www.linkedin.com/posts/article")
+    assert article["author"] == "Pat Student" and "Thanks team!" in article["text"]
+    assert [u.split("/feedshare-")[1] for u in article["images"]] == ["shrink_800/a?e=1&t=x", "shrink_800/b?e=1"]
+
+
+def test_private_and_generic_pages(web):
+    assert "isn't public" in web.read("https://lnkd.in/p/private")["note"]
+    site = web.read("https://example.edu/portfolio")
+    assert "It sorts cubes." in site["text"] and site["has_video"]
+    assert "HTTP 404" in web.read("https://example.edu/missing")["note"]
+
+
+def test_view_webpage_returns_photos(web):
+    from mcp.server.mcpserver import Image
+
+    out = server.view_webpage("https://www.linkedin.com/posts/article")
+    assert out[0]["photos"] == 2 and sum(isinstance(o, Image) for o in out[1:]) == 2
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8080/admin", "http://localhost/", "file:///etc/passwd", "http://10.0.0.5/"])
+def test_local_addresses_are_refused(url):
+    from canvas_grader_mcp import webpage
+
+    with pytest.raises(webpage.PageError):
+        webpage.read(url)

@@ -1,6 +1,6 @@
 [project]
 name = "canvas-grader-mcp"
-version = "0.4.0"
+version = "0.5.0"
 description = "MCP server that helps teachers and TAs grade Canvas LMS submissions and leave SpeedGrader feedback"
 readme = "README.md"
 license = "MIT"

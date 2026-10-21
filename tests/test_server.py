@@ -120,6 +120,17 @@ class FakeCanvas:
             return httpx.Response(200, json={"late_policy": {
                 "late_submission_deduction_enabled": True, "late_submission_deduction": 10,
                 "late_submission_interval": "day", "late_submission_minimum_percent_enabled": False}})
+        if api == "/courses/1/custom_gradebook_columns":
+            if method == "POST":
+                self.notes_col = {"id": 5, "title": "Notes", "teacher_notes": True}
+                return httpx.Response(200, json=self.notes_col)
+            return httpx.Response(200, json=[self.notes_col] if getattr(self, "notes_col", None) else [])
+        if api == "/courses/1/custom_gradebook_columns/5/data":
+            return httpx.Response(200, json=[{"user_id": u, "content": t} for u, t in getattr(self, "notes", {}).items()])
+        if api.startswith("/courses/1/custom_gradebook_columns/5/data/") and method == "PUT":
+            self.notes = getattr(self, "notes", {})
+            self.notes[int(api.rsplit("/", 1)[1])] = parse_qs(request.content.decode())["column_data[content]"][0]
+            return httpx.Response(200, json={})
         if api == "/courses/1/assignments/10":
             return httpx.Response(200, json=self.assignment)
         if api == "/courses/1/assignments/10/submissions":
@@ -424,3 +435,12 @@ def test_linked_google_docs(fake, monkeypatch, tmp_path):
     assert files[0]["kind"] == "pdf" and "youtu.be/inside" in files[0]["text"] and "live Google link" in files[0]["note"]
     monkeypatch.setattr(linked, "fetch", lambda *a: (None, "not publicly shared"))
     assert "not publicly shared" in server.linked_documents(1, 10, 100, url)[0]["note"]
+
+
+def test_gradebook_notes(fake):
+    preview = server.add_gradebook_note(1, 100, "missing video", label="Lab 1")
+    assert preview["creates_notes_column"] and not getattr(fake, "notes_col", None)  # preview writes nothing
+    server.add_gradebook_note(1, 100, "missing video", label="Lab 1", confirm=True)
+    server.add_gradebook_note(1, 100, "late", label="Lab 2", confirm=True)
+    assert server.get_gradebook_notes(1, 100)["notes"][100] == "[Lab 1] missing video\n[Lab 2] late"
+    assert server.add_gradebook_note(1, 100, "late", label="Lab 2", confirm=True)["unchanged"]

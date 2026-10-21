@@ -114,6 +114,7 @@ If the assignment posts grades automatically, students see them immediately once
 | `list_staged` / `discard_staged` | no | Review or drop staged grades |
 | `post_staged_grades` | **yes** (with `confirm=true`) | Send staged grades and comments to Canvas |
 | `post_comment` | **yes** (with `confirm=true`) | Comment on a submission without grading |
+| `get_gradebook_notes` / `add_gradebook_note` | notes only (with `confirm=true`) | Staff-only notes in the Gradebook Notes column (never visible to students) |
 | `open_in_speedgrader` | no | Open SpeedGrader in your browser |
 | `clear_downloaded_files` | no | Delete cached copies of student files |
 

@@ -669,6 +669,46 @@ def post_comment(
 
 
 @mcp.tool()
+def get_gradebook_notes(course_id: int, user_id: int | None = None) -> dict:
+    """Staff-only notes from the Gradebook 'Notes' column (never shown to students)."""
+    require_grader(course_id)
+    c = client()
+    col = c.notes_column(course_id)
+    if col is None:
+        return {"notes": {}, "note": "This course has no Notes column yet; add_gradebook_note creates it."}
+    notes = c.notes(course_id, col["id"])
+    return {"notes": {user_id: notes.get(user_id, "")} if user_id else notes}
+
+
+@mcp.tool()
+def add_gradebook_note(
+    course_id: int,
+    user_id: int,
+    note: Annotated[str, Field(description="Private note for instructors/TAs, e.g. why this student scored differently from teammates")],
+    label: Annotated[str | None, Field(description="Prefix such as the assignment name, e.g. 'Lab 1.6'")] = None,
+    confirm: Annotated[bool, Field(description="false = preview only; true only after the user approves")] = False,
+) -> dict:
+    """Append a staff-only note for a student in the Gradebook 'Notes' column (teachers/TAs only; students never see it).
+
+    Existing notes are kept. Turns on the course's Notes column if it isn't already.
+    """
+    require_grader(course_id)
+    c = client()
+    col = c.notes_column(course_id)
+    existing = c.notes(course_id, col["id"]).get(user_id, "") if col else ""
+    line = f"[{label}] {note}" if label else note
+    content = f"{existing}\n{line}" if existing else line
+    if line in existing:
+        return {"unchanged": True, "note": "That note is already there."}
+    if not confirm:
+        return {"preview": content, "creates_notes_column": col is None,
+                "next": "Visible to the course's teachers and TAs only. Call again with confirm=true once the user approves."}
+    col = col or c.notes_column(course_id, create=True)
+    c.set_note(course_id, col["id"], user_id, content)
+    return {"saved": True, "content": content}
+
+
+@mcp.tool()
 def open_in_speedgrader(course_id: int, assignment_id: int, user_id: int | None = None) -> str:
     """Open SpeedGrader in the user's browser (optionally on a specific student)."""
     url = client().speedgrader_url(course_id, assignment_id, user_id)

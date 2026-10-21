@@ -151,6 +151,23 @@ class CanvasClient:
     def update_submission(self, course_id: int, assignment_id: int, user_id: int, data: dict[str, Any]) -> dict:
         return self.put(f"/courses/{course_id}/assignments/{assignment_id}/submissions/{user_id}", data)
 
+    # Gradebook "Notes": a course-wide column only teachers and TAs can see.
+    def notes_column(self, course_id: int, create: bool = False) -> dict | None:
+        cols = self.get_all(f"/courses/{course_id}/custom_gradebook_columns", [("include_hidden", "true")])
+        col = next((c for c in cols if c.get("teacher_notes")), None)
+        if col is None and create:
+            col = self._request("POST", f"/courses/{course_id}/custom_gradebook_columns",
+                                data={"column[title]": "Notes", "column[teacher_notes]": "true"}).json()
+        return col
+
+    def notes(self, course_id: int, column_id: int) -> dict[int, str]:
+        rows = self.get_all(f"/courses/{course_id}/custom_gradebook_columns/{column_id}/data", [("include_hidden", "true")])
+        return {r["user_id"]: r.get("content") or "" for r in rows}
+
+    def set_note(self, course_id: int, column_id: int, user_id: int, content: str) -> dict:
+        return self.put(f"/courses/{course_id}/custom_gradebook_columns/{column_id}/data/{user_id}",
+                        {"column_data[content]": content})
+
     def speedgrader_url(self, course_id: int, assignment_id: int, user_id: int | None = None) -> str:
         url = f"{self.base_url}/courses/{course_id}/gradebook/speed_grader?assignment_id={assignment_id}"
         return f"{url}&student_id={user_id}" if user_id else url

@@ -523,19 +523,45 @@ def clear_downloaded_files() -> str:
 # --- entry point ---------------------------------------------------------------
 
 
-def configure() -> None:
-    print("Canvas grader setup. Your token is stored only on this computer.")
-    base = input("Canvas URL (e.g. https://canvas.school.edu): ").strip()
-    print("Create a token in Canvas: Account > Settings > Approved Integrations > + New Access Token")
-    token = input("Access token: ").strip()
+def _ask(prompt: str) -> str:
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
+def configure(args: list[str]) -> None:
+    import argparse
+    import os
+
     from .config import normalize_base_url
+
+    parser = argparse.ArgumentParser(prog="canvas-grader-mcp configure")
+    parser.add_argument("--url", help="Canvas URL, e.g. https://canvas.school.edu (or CANVAS_BASE_URL)")
+    parser.add_argument("--token", help="Canvas access token (or CANVAS_API_TOKEN)")
+    opts = parser.parse_args(args)
+
+    print("Canvas grader setup. Your token is stored only on this computer.")
+    base = opts.url or os.environ.get("CANVAS_BASE_URL") or _ask("Canvas URL (e.g. https://canvas.school.edu): ")
+    if not base:
+        sys.exit("No Canvas URL given. Pass --url https://canvas.school.edu")
+    token = opts.token or os.environ.get("CANVAS_API_TOKEN")
+    if not token:
+        print("Create a token in Canvas: Account > Settings > Approved Integrations > + New Access Token")
+        token = _ask("Access token: ")
+    token = token.strip()
+    if not token:
+        sys.exit(
+            "No access token given. If you can't type at the prompt (e.g. running via `!` in Claude Code), "
+            "pass it directly: canvas-grader-mcp configure --url <url> --token <token>"
+        )
 
     settings = Settings(normalize_base_url(base), token)
     probe = CanvasClient(settings)
     try:
         me = probe.me()
     except Exception as exc:
-        sys.exit(f"Could not sign in: {exc}")
+        sys.exit(f"Could not sign in to {settings.base_url}: {exc}")
     finally:
         probe.close()
     print(f"Signed in as {me.get('name')}. Saved to {settings.save()}")
@@ -556,13 +582,13 @@ def check() -> None:
 def main() -> None:
     command = sys.argv[1] if len(sys.argv) > 1 else "serve"
     if command == "configure":
-        configure()
+        configure(sys.argv[2:])
     elif command == "check":
         check()
     elif command in ("serve", "stdio"):
         mcp.run()
     else:
-        sys.exit("usage: canvas-grader-mcp [serve|configure|check]")
+        sys.exit("usage: canvas-grader-mcp [serve | configure [--url URL --token TOKEN] | check]")
 
 
 if __name__ == "__main__":

@@ -212,3 +212,12 @@ def test_config_file_is_private(tmp_path, monkeypatch):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert Settings.load().base_url == "https://canvas.school.edu"
     assert json.loads(path.read_text())["token"] == "tok"
+
+
+def test_configure_rejects_blank_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("CANVAS_GRADER_CONFIG", str(tmp_path / "c.json"))
+    monkeypatch.delenv("CANVAS_API_TOKEN", raising=False)
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    with pytest.raises(SystemExit, match="No access token"):
+        server.configure(["--url", "canvas.test"])
+    assert not (tmp_path / "c.json").exists()

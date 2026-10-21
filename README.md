@@ -35,7 +35,7 @@ In Canvas: **Account → Settings → Approved Integrations → + New Access Tok
 uvx --from git+https://github.com/kaushikgunasekaren/canvas-grader-mcp canvas-grader-mcp configure
 ```
 
-This asks for your Canvas URL and token, checks that they work, and saves them to `~/.config/canvas-grader-mcp/config.json` (readable only by you; `%APPDATA%\canvas-grader-mcp` on Windows). Alternatively set the `CANVAS_BASE_URL` and `CANVAS_API_TOKEN` environment variables in your MCP client config.
+This asks for your Canvas URL and token (or pass them as `configure --url <url> --token <token>` where you can't type at a prompt), checks that they work, and saves them to `~/.config/canvas-grader-mcp/config.json` (readable only by you; `%APPDATA%\canvas-grader-mcp` on Windows). Alternatively set the `CANVAS_BASE_URL` and `CANVAS_API_TOKEN` environment variables in your MCP client config.
 
 Check it can see your courses:
 

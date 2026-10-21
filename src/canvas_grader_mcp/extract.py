@@ -99,7 +99,19 @@ def truncate(text: str, limit: int = MAX_CHARS) -> str:
 
 def extract_file(path: Path) -> dict:
     """Return {'kind', 'text'?, 'note'?} for a downloaded submission file."""
-    ext = path.suffix.lower()
+    from .media import effective_suffix, video_duration
+
+    ext = effective_suffix(path)
+    detected = {"detected_type": ext} if ext != path.suffix.lower() else {}
+    result = _extract(path, ext)
+    if result.get("kind") == "media" and path.exists():
+        if duration := video_duration(path):
+            result["duration_seconds"] = round(duration, 1)
+            result["note"] += " Use get_submission_images(video_frames=N) to see frames (e.g. a recording of code)."
+    return {**result, **detected}
+
+
+def _extract(path: Path, ext: str) -> dict:
     try:
         if ext == ".pdf":
             import pypdfium2 as pdfium
@@ -157,10 +169,10 @@ def extract_file(path: Path) -> dict:
                 entry = {"filename": str(member.relative_to(path.with_name(path.name + ".d"))), "size": sizes.get(member.name)}
                 if member.suffix.lower() in MEDIA_EXTENSIONS:
                     entry.update(kind="media", note="Video/audio file inside the zip (not extracted, can't be watched here).")
-                elif member.exists():
-                    entry.update(extract_file(member))
-                else:
+                elif not member.exists():
                     entry.update(kind="skipped", note="Too large to extract.")
+                else:
+                    entry.update(extract_file(member))
                 members.append(entry)
             return {"kind": "zip", "members": members}
         if ext in MEDIA_EXTENSIONS:

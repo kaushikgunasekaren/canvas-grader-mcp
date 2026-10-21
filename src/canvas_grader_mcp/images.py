@@ -10,6 +10,7 @@ from pathlib import Path
 from PIL import Image as PILImage
 
 from .extract import IMAGE_EXTENSIONS, count_pdf_images, unzip
+from .media import VIDEO_EXTENSIONS, effective_suffix, video_frames
 
 MAX_SIDE = 1400
 MIN_SIDE = 48  # skip icons, bullets and tracking pixels
@@ -34,7 +35,7 @@ def _open(data: bytes) -> PILImage.Image | None:
 
 def file_images(path: Path, max_side: int = MAX_SIDE) -> list[tuple[str, PILImage.Image]]:
     """(label, image) pairs for one submitted file; PDF pages are rendered with max_side as the long edge."""
-    ext = path.suffix.lower()
+    ext = effective_suffix(path)
     out: list[tuple[str, PILImage.Image]] = []
     if ext == ".pdf":
         import pypdfium2 as pdfium
@@ -60,12 +61,16 @@ def file_images(path: Path, max_side: int = MAX_SIDE) -> list[tuple[str, PILImag
     return out
 
 
-def collect(paths: list[Path], max_images: int, max_side: int = MAX_SIDE) -> tuple[list[tuple[str, bytes]], int]:
+def collect(paths: list[Path], max_images: int, max_side: int = MAX_SIDE, frames_per_video: int = 0) -> tuple[list[tuple[str, bytes]], int]:
     """Encoded, de-duplicated images across files, capped at max_images. Returns (images, total_found)."""
     seen: set[str] = set()
     found: list[tuple[str, bytes]] = []
     for path in paths:
-        for label, img in file_images(path, max_side):
+        is_video = effective_suffix(path) in VIDEO_EXTENSIONS
+        if is_video and not frames_per_video:
+            continue
+        pictures = video_frames(path, frames_per_video, max_side) if is_video else file_images(path, max_side)
+        for label, img in pictures:
             data = _encode(img, max_side)
             digest = hashlib.sha1(data).hexdigest()
             if digest in seen:

@@ -13,7 +13,7 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from . import images, lateness, linked
+from . import images, lateness, linked, media
 from .breakdown import Adjustment, Category, build as build_breakdown
 from .canvas import CanvasClient
 from .config import ConfigError, Settings, cache_dir
@@ -257,6 +257,7 @@ def get_submission(
     download_files: bool = True,
     attempt: Annotated[int | None, Field(description="Read an earlier attempt (default: latest). See 'attempts' in the result.")] = None,
     fetch_links: Annotated[bool, Field(description="Download publicly shared Google Docs/Slides/Sheets the student linked instead of uploading")] = True,
+    check_links: Annotated[bool, Field(description="Classify every link in the submission (video, photo, document, not_public...) so e.g. a photo link isn't mistaken for the required video")] = True,
 ) -> dict:
     """A student's submitted work as text (text entry, URL, PDF/DOCX/code/notebook/.sb3 files, linked Google Docs), QR-code links, lateness, previous comments and grade."""
     require_grader(course_id)
@@ -280,12 +281,20 @@ def get_submission(
         text_so_far = " ".join([s.get("body") or "", s.get("url") or ""] + [f.get("text") or "" for f in files])
         files.extend(linked_documents(course_id, assignment_id, user_id, text_so_far))
     if download_files:
-        visual = [Path(f["local_path"]) for f in files if f.get("local_path") and Path(f["local_path"]).suffix.lower() not in MEDIA_EXTENSIONS]
+        visual = [Path(f["local_path"]) for f in files if f.get("local_path") and f.get("kind") != "media"]
         if codes := images.qr_codes(visual):
             content["qr_codes"] = codes
+    if check_links:
+        student_comments = [cm.get("comment") or "" for cm in latest.get("submission_comments") or [] if cm.get("author_id") == user_id]
+        urls = media.find_urls(s.get("body") or "", s.get("url") or "", *[f.get("text") or "" for f in files],
+                               *[q["text"] for q in content.get("qr_codes", [])], *student_comments)[:15]
+        if urls:
+            content["links"] = [media.classify_link(u) for u in urls]
     if files:
         content["files"] = files
         flat = files + [m for f in files for m in f.get("members", [])]
+        if any(f.get("kind") == "media" for f in files):
+            content["videos"] = "Video files are attached; get_submission_images(video_frames=4) shows frames from them (useful when a student recorded their code)."
         if any(f.get("pages_with_images") or f.get("images") or f.get("kind") == "image" for f in flat):
             content["visual_content"] = (
                 "Screenshots/photos are embedded. They're not in the text above: call get_submission_images to see them before grading."
@@ -376,6 +385,7 @@ def get_submission_images(
     max_images: Annotated[int, Field(ge=1, le=30)] = 12,
     attempt: int | None = None,
     detail: Annotated[Literal["normal", "high"], Field(description="'high' renders at twice the resolution, for small text or blurry photos")] = "normal",
+    video_frames: Annotated[int, Field(ge=0, le=8, description="Also return this many frames from each attached video (e.g. a recording of the student's code)")] = 0,
 ) -> list:
     """Screenshots, photos and scanned pages from a student's submitted files, as images.
 
@@ -385,7 +395,8 @@ def get_submission_images(
     require_grader(course_id)
     s = pick_attempt(client().submission(course_id, assignment_id, user_id), attempt)
     paths = submission_paths(course_id, assignment_id, user_id, s)
-    found, total = images.collect(paths, max_images, max_side=2800 if detail == "high" else images.MAX_SIDE)
+    found, total = images.collect(paths, max_images, max_side=2800 if detail == "high" else images.MAX_SIDE,
+                                  frames_per_video=video_frames)
     if not found:
         return [f"No images found in {student_name(s)}'s submitted files."]
     header = f"{student_name(s)}: {len(found)} image(s)" + (f" of {total}; raise max_images to see the rest" if total > len(found) else "")
@@ -407,7 +418,8 @@ def find_shared_files(course_id: int, assignment_id: int) -> list[dict]:
     for s in client().submissions(course_id, assignment_id):
         for att in s.get("attachments") or []:
             name = att.get("display_name") or att.get("filename") or ""
-            if Path(name).suffix.lower() in MEDIA_EXTENSIONS or (att.get("size") or 0) > 50 * 1024 * 1024:
+            mime = att.get("content-type") or ""
+            if Path(name).suffix.lower() in MEDIA_EXTENSIONS or mime.startswith(("video/", "audio/")) or (att.get("size") or 0) > 50 * 1024 * 1024:
                 continue
             path = download_attachment(course_id, assignment_id, s["user_id"], att)
             if path is None:

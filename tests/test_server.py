@@ -444,3 +444,68 @@ def test_gradebook_notes(fake):
     server.add_gradebook_note(1, 100, "late", label="Lab 2", confirm=True)
     assert server.get_gradebook_notes(1, 100)["notes"][100] == "[Lab 1] missing video\n[Lab 2] late"
     assert server.add_gradebook_note(1, 100, "late", label="Lab 2", confirm=True)["unchanged"]
+
+
+def make_video(path, seconds=2):
+    import subprocess
+
+    from canvas_grader_mcp.media import ffmpeg_exe
+
+    subprocess.run([ffmpeg_exe(), "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc=size=320x240:rate=10:duration={seconds}",
+                    "-pix_fmt", "yuv420p", "-f", "mp4", str(path)], check=True)
+
+
+def test_extensionless_files_are_detected(tmp_path):
+    from canvas_grader_mcp.extract import extract_file
+    from canvas_grader_mcp.images import collect
+
+    video = tmp_path / "Lab 1.6"  # what Canvas gives for an upload named without an extension
+    make_video(video)
+    info = extract_file(video)
+    assert info["kind"] == "media" and info["detected_type"] == ".mp4" and info["duration_seconds"] == 2.0
+    photo = tmp_path / "Lab 1.6 code"
+    photo.write_bytes(make_png("blue", (300, 200)))
+    assert extract_file(photo)["kind"] == "image"
+    found, _ = collect([photo, video], max_images=10)
+    assert [label for label, _ in found] == ["Lab 1.6 code"]  # videos only when frames are requested
+    found, _ = collect([video], max_images=10, frames_per_video=3)
+    assert [label.split(" at ")[0] for label, _ in found] == ["Lab 1.6"] * 3
+
+
+def test_sniff_office_and_projects(tmp_path):
+    import zipfile
+
+    from canvas_grader_mcp.media import sniff
+
+    for name, member, expected in (("a", "word/document.xml", ".docx"), ("b", "project.json", ".sb3"), ("c", "x.txt", ".zip")):
+        with zipfile.ZipFile(tmp_path / name, "w") as zf:
+            zf.writestr(member, "{}")
+        assert sniff(tmp_path / name) == expected
+    (tmp_path / "d").write_bytes(make_pdf_with_image())
+    assert sniff(tmp_path / "d") == ".pdf"
+
+
+def test_classify_links():
+    from canvas_grader_mcp.media import classify_link, find_urls
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "drive.google.com/file/d/VIDEO" in url:
+            return httpx.Response(200, text='<meta property="og:title" content="Lab.mp4">"video/mp4"')
+        if "drive.google.com/file/d/PRIVATE" in url:
+            return httpx.Response(302, headers={"Location": "https://accounts.google.com/signin"})
+        if "accounts.google.com" in url:
+            return httpx.Response(200, text="sign in")
+        if url.startswith("https://photos.app.goo.gl/"):
+            return httpx.Response(302, headers={"Location": "https://photos.google.com/share/ABC"})
+        if "photos.google.com/share/ABC" in url:
+            return httpx.Response(200, text='<meta property="og:title" content="New video">"video/mp4"')
+        raise AssertionError(f"unexpected fetch {url}")
+
+    http = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+    kinds = {u: classify_link(u, http)["kind"] for u in [
+        "https://drive.google.com/file/d/VIDEO/view", "https://drive.google.com/file/d/PRIVATE/view",
+        "https://photos.app.goo.gl/xyz", "https://youtu.be/abc", "https://example.com/page"]}
+    assert kinds == {"https://drive.google.com/file/d/VIDEO/view": "video", "https://drive.google.com/file/d/PRIVATE/view": "not_public",
+                     "https://photos.app.goo.gl/xyz": "video", "https://youtu.be/abc": "video", "https://example.com/page": "webpage"}
+    assert find_urls("see https://youtu.be/abc. and (https://example.com/x)") == ["https://youtu.be/abc", "https://example.com/x"]

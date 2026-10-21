@@ -524,12 +524,10 @@ def clear_downloaded_files() -> str:
 
 
 def configure() -> None:
-    import getpass
-
     print("Canvas grader setup. Your token is stored only on this computer.")
     base = input("Canvas URL (e.g. https://canvas.school.edu): ").strip()
     print("Create a token in Canvas: Account > Settings > Approved Integrations > + New Access Token")
-    token = getpass.getpass("Access token (input hidden): ").strip()
+    token = input("Access token: ").strip()
     from .config import normalize_base_url
 
     settings = Settings(normalize_base_url(base), token)

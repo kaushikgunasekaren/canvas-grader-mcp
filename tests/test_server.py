@@ -594,3 +594,8 @@ def test_local_addresses_are_refused(url):
 
     with pytest.raises(webpage.PageError):
         webpage.read(url)
+
+
+def test_numeric_grades_are_formatted(fake):
+    assert server.stage_grade(1, 10, 100, rationale="r", grade=0.0)["grade"] == "0"
+    assert server.stage_grade(1, 10, 100, rationale="r", grade=8.50)["grade"] == "8.5"

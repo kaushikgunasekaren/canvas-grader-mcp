@@ -509,7 +509,7 @@ def normalize_grade(a: dict, grade: str | float | None) -> tuple[str | None, lis
         return None, []
     warnings: list[str] = []
     gtype = a.get("grading_type")
-    text = str(grade).strip()
+    text = f"{grade:g}" if isinstance(grade, (int, float)) and not isinstance(grade, bool) else str(grade).strip()
     if gtype == "pass_fail":
         lowered = text.lower()
         if lowered not in ("complete", "incomplete", "pass", "fail"):

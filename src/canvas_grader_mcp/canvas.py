@@ -9,7 +9,7 @@ from typing import Any, Iterator
 import httpx
 from mcp.server.mcpserver.exceptions import ToolError
 
-from .config import Settings
+from .config import Settings, private_file
 
 Params = list[tuple[str, Any]] | dict[str, Any] | None
 
@@ -92,13 +92,12 @@ class CanvasClient:
         return self._request("PUT", path, data=data).json()
 
     def download(self, url: str, dest: Path) -> Path:
-        dest.parent.mkdir(parents=True, exist_ok=True)
         # Only ever send the token to the Canvas host itself.
         headers = {"Authorization": f"Bearer {self._token}"} if httpx.URL(url).host == self._host else {}
         with self._files.stream("GET", url, headers=headers) as resp:
             if resp.is_error:
                 raise CanvasError(f"Download failed ({resp.status_code}) for {dest.name}")
-            with dest.open("wb") as fh:
+            with open(private_file(dest), "wb") as fh:
                 for chunk in resp.iter_bytes():
                     fh.write(chunk)
         return dest

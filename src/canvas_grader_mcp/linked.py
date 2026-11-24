@@ -7,6 +7,8 @@ from pathlib import Path
 
 import httpx
 
+from .config import write_private
+
 GOOGLE_DOC = re.compile(r"https://docs\.google\.com/(document|presentation|spreadsheets)/d/([A-Za-z0-9_-]{20,})")
 EXPORT = {"document": "document/d/{id}/export?format=pdf", "presentation": "presentation/d/{id}/export/pdf",
           "spreadsheets": "spreadsheets/d/{id}/export?format=pdf"}
@@ -40,6 +42,4 @@ def fetch(kind: str, doc_id: str, dest: Path) -> tuple[Path | None, str | None]:
         return None, "not publicly shared (needs a Google sign-in); ask the student to share it or upload a file"
     if len(resp.content) > MAX_BYTES:
         return None, "too large to download"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(resp.content)
-    return dest, None
+    return write_private(dest, resp.content), None

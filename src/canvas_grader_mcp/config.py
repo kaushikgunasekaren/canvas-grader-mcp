@@ -44,6 +44,33 @@ def cache_dir() -> Path:
     return _xdg("XDG_CACHE_HOME", ".cache")
 
 
+def private_dir(path: Path) -> Path:
+    """Create path (and any missing parents) readable only by the current user.
+
+    Student submissions and grades are education records, so nothing this server
+    writes should be readable by other accounts on the machine.
+    """
+    missing = [p for p in (path, *path.parents) if not p.exists()]
+    for p in reversed(missing):
+        p.mkdir(mode=0o700)
+        os.chmod(p, 0o700)  # mkdir's mode is masked by the umask
+    return path
+
+
+def private_file(path: Path) -> int:
+    """Open path for writing with owner-only permissions; returns a file descriptor."""
+    private_dir(path.parent)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.chmod(path, 0o600)
+    return fd
+
+
+def write_private(path: Path, data: bytes) -> Path:
+    with os.fdopen(private_file(path), "wb") as fh:
+        fh.write(data)
+    return path
+
+
 class ConfigError(ToolError):
     pass
 
@@ -71,11 +98,8 @@ class Settings:
 
     def save(self) -> Path:
         path = config_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(private_file(path), "w") as fh:
             json.dump({"base_url": self.base_url, "token": self.token}, fh, indent=2)
-        os.chmod(path, 0o600)
         return path
 
 

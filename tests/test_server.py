@@ -599,3 +599,53 @@ def test_local_addresses_are_refused(url):
 def test_numeric_grades_are_formatted(fake):
     assert server.stage_grade(1, 10, 100, rationale="r", grade=0.0)["grade"] == "0"
     assert server.stage_grade(1, 10, 100, rationale="r", grade=8.50)["grade"] == "8.5"
+
+
+def _mode(path):
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def test_downloaded_student_files_are_private(fake, tmp_path):
+    server.get_submission(1, 10, 100)
+    cache = tmp_path / "cache" / "canvas-grader-mcp"
+    files = [p for p in cache.rglob("*") if p.is_file()]
+    assert files
+    assert all(_mode(p) == 0o600 for p in files)
+    assert all(_mode(p) == 0o700 for p in [cache, *[d for d in cache.rglob("*") if d.is_dir()]])
+
+
+def test_zip_members_are_private(tmp_path):
+    import zipfile
+
+    from canvas_grader_mcp.extract import extract_file
+
+    z = tmp_path / "lab.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("Lab/main.py", "print('hi')\n")
+    extract_file(z)
+    member = tmp_path / "lab.zip.d" / "Lab" / "main.py"
+    assert _mode(member) == 0o600 and _mode(member.parent) == 0o700
+
+
+def test_staging_dir_is_private(tmp_path):
+    store = StagingStore(tmp_path / "data" / "staged.json")
+    store.put({"course_id": 1, "assignment_id": 2, "user_id": 3})
+    assert _mode(tmp_path / "data") == 0o700 and _mode(tmp_path / "data" / "staged.json") == 0o600
+
+
+def test_purge_cache_removes_only_old_files(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    root = tmp_path / "cache" / "canvas-grader-mcp"
+    old, new = root / "1" / "10" / "100" / "old.pdf", root / "1" / "11" / "101" / "new.pdf"
+    for f in (old, new):
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x")
+    now = 1_800_000_000
+    os.utime(old, (now - 40 * 86400, now - 40 * 86400))
+    os.utime(new, (now - 86400, now - 86400))
+    assert server.purge_cache(30, now=now) == 1
+    assert not old.exists() and not (root / "1" / "10").exists() and new.exists()
+    assert _mode(root) == 0o700
+    assert server.purge_cache(0, now=now) == 0 and new.exists()

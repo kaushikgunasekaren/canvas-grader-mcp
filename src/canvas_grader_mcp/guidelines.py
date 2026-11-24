@@ -15,7 +15,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from .config import data_dir
+from .config import data_dir, private_dir
 
 
 class LateTier(BaseModel):
@@ -59,7 +59,7 @@ class GuidelineStore:
             ordered = sorted(late_tiers, key=lambda t: math.inf if t.under_days is None else t.under_days)
             entry["late_tiers"] = [t.model_dump() for t in ordered]
         entries[str(course_id)] = entry
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        private_dir(self.path.parent)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".guidelines-")
         with os.fdopen(fd, "w") as fh:
             json.dump(entries, fh, indent=2)

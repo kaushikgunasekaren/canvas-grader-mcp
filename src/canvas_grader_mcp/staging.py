@@ -8,7 +8,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import data_dir
+from .config import data_dir, private_dir
 
 
 def _key(course_id: int, assignment_id: int, user_id: int) -> str:
@@ -25,7 +25,7 @@ class StagingStore:
         return json.loads(self.path.read_text())
 
     def _save(self, entries: dict[str, dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        private_dir(self.path.parent)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".staged-")
         with os.fdopen(fd, "w") as fh:
             json.dump(entries, fh, indent=2)

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import sys
+import time
 import webbrowser
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -781,6 +783,41 @@ def clear_downloaded_files() -> str:
     return f"Removed {path}"
 
 
+CACHE_DAYS_DEFAULT = 30
+
+
+def purge_cache(days: float | None = None, now: float | None = None) -> int:
+    """Delete cached student files older than `days` (CANVAS_GRADER_CACHE_DAYS, default 30; 0 keeps everything).
+
+    Downloaded submissions are education records; keeping them only as long as grading needs them
+    limits what sits on disk. Also makes the cache owner-only in case it was created by an older version.
+    """
+    if days is None:
+        try:
+            days = float(os.environ.get("CANVAS_GRADER_CACHE_DAYS", CACHE_DAYS_DEFAULT))
+        except ValueError:
+            days = CACHE_DAYS_DEFAULT
+    root = cache_dir()
+    if not root.exists():
+        return 0
+    os.chmod(root, 0o700)
+    if days <= 0:
+        return 0
+    cutoff = (now or time.time()) - days * 86400
+    removed = 0
+    for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        try:
+            if path.is_file() or path.is_symlink():
+                if path.lstat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            elif path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+        except OSError:
+            continue
+    return removed
+
+
 # --- entry point ---------------------------------------------------------------
 
 
@@ -847,6 +884,7 @@ def main() -> None:
     elif command == "check":
         check()
     elif command in ("serve", "stdio"):
+        purge_cache()
         mcp.run()
     else:
         sys.exit("usage: canvas-grader-mcp [serve | configure [--url URL --token TOKEN] | check]")

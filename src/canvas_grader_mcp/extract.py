@@ -7,6 +7,8 @@ import re
 from html.parser import HTMLParser
 from pathlib import Path
 
+from .config import write_private
+
 MAX_CHARS = 60_000
 
 TEXT_EXTENSIONS = {
@@ -36,8 +38,7 @@ def unzip(path: Path) -> list[Path]:
                 out.append(target)  # recorded, not extracted
                 continue
             if not target.exists():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(zf.read(info))
+                write_private(target, zf.read(info))
             out.append(target)
     return out
 
